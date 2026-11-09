@@ -1,0 +1,6 @@
+{
+  "summary":  "Comprehensive implementation plan to remove fixed potential caps across the entire simulation engine, types, and UI. Introduces an uncapped dynamic progression engine where any player can reach up to 99 overall rating through match ratings, playing time, form, and age curve, paired with Growth Momentum indicators and Youth Academy development tiers.",
+  "updatedAt":  "2026-11-09T19:53:31.222917496Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

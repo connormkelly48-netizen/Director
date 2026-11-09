@@ -1,0 +1,6 @@
+{
+  "name": "The Boardroom: Sporting Director Simulator",
+  "description": "Football sporting director management simulation across the Premier League, Championship, and League One with owner personalities, manager power struggles, and deep transfer markets.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
