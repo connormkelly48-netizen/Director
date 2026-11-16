@@ -4,7 +4,7 @@
  */
 
 import React, { useState } from 'react';
-import { Club, Director, Owner, TakeoverConsortium } from '../types/game';
+import { Club, Director, Owner } from '../types/game';
 import { Building2, Shield, TrendingUp, AlertTriangle, DollarSign, Check, X, Users, Sparkles } from 'lucide-react';
 import { sounds } from '../services/soundEffects';
 
@@ -77,7 +77,7 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
     <div className="space-y-6">
       
       {/* Boardroom Header */}
-      <div className="bg-[#111827] border border-white/10 rounded-2xl p-6">
+      <div className="bg-[#111827] border border-white/10 rounded-2xl p-4 sm:p-6">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
             <div className="flex items-center gap-2 text-xs font-bold text-amber-400 uppercase tracking-wider mb-1">
@@ -87,19 +87,29 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
             <h1 className="text-2xl lg:text-3xl font-extrabold text-white tracking-tight">
               Owner Dossier & Boardroom Relations
             </h1>
-            <p className="text-slate-400 text-xs mt-1">
+            <p className="text-slate-400 text-xs mt-1 max-w-[75ch]">
               Manage ownership expectations, negotiate budgetary expansion, and navigate takeover threats.
             </p>
           </div>
           
-          <div className="flex items-center gap-3">
-            <div className="px-4 py-2 bg-slate-900 border border-white/10 rounded-xl text-right">
-              <span className="text-[10px] text-slate-400 uppercase block">Board Confidence</span>
-              <span className={`text-lg font-bold font-mono ${
-                owner.approval > 70 ? 'text-emerald-400' : owner.approval > 45 ? 'text-amber-400' : 'text-rose-500'
-              }`}>
-                {owner.approval}%
-              </span>
+          <div className="w-full md:w-56">
+            <div className="px-4 py-2.5 bg-slate-900 border border-white/10 rounded-xl">
+              <div className="flex items-center justify-between gap-2 mb-1.5">
+                <span className="text-xs sm:text-[10px] text-slate-400 uppercase">Board Confidence</span>
+                <span className={`text-base sm:text-lg font-bold font-mono tabular-nums ${
+                  owner.approval > 70 ? 'text-emerald-400' : owner.approval > 45 ? 'text-amber-400' : 'text-rose-500'
+                }`}>
+                  {owner.approval}%
+                </span>
+              </div>
+              <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
+                <div
+                  className={`h-full transition-all duration-300 ${
+                    owner.approval > 70 ? 'bg-emerald-400' : owner.approval > 45 ? 'bg-amber-400' : 'bg-rose-500'
+                  }`}
+                  style={{ width: `${owner.approval}%` }}
+                />
+              </div>
             </div>
           </div>
         </div>
@@ -109,10 +119,10 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         
         {/* Left 2 Cols: Detailed Owner Profile */}
-        <div className="lg:col-span-2 bg-[#111827] border border-white/10 rounded-xl p-6 space-y-5">
-          <div className="flex items-start justify-between border-b border-white/10 pb-4">
+        <div className="lg:col-span-2 bg-[#111827] border border-white/10 rounded-xl p-4 sm:p-6 space-y-5">
+          <div className="flex flex-wrap items-start justify-between gap-2 border-b border-white/10 pb-4">
             <div>
-              <span className="text-[11px] font-bold tracking-wider uppercase text-amber-400 block mb-0.5">
+              <span className="text-xs sm:text-[11px] font-bold tracking-wider uppercase text-amber-400 block mb-0.5">
                 Current Majority Owner
               </span>
               <h2 className="text-xl font-extrabold text-white">
@@ -129,16 +139,16 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
             </div>
           </div>
 
-          <p className="text-xs leading-relaxed text-slate-300 italic font-serif">
+          <p className="text-xs leading-relaxed text-slate-300 italic font-serif max-w-[75ch]">
             "{owner.description}"
           </p>
 
           {/* Personality Breakdown Matrix */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div className="bg-slate-900/80 border border-white/5 rounded-xl p-3">
-              <span className="text-[10px] text-slate-400 uppercase block mb-1">Patience Level</span>
+              <span className="text-xs sm:text-[10px] text-slate-400 uppercase block mb-1">Patience Level</span>
               <span className="text-sm font-bold text-white capitalize">{owner.patience}</span>
-              <span className="text-[10px] text-slate-500 block mt-0.5">
+              <span className="text-xs sm:text-[10px] text-slate-500 block mt-0.5">
                 {owner.patience === 'volatile' ? 'Sacks easily on losing streaks' :
                  owner.patience === 'impatient' ? 'Demands instant success' :
                  owner.patience === 'balanced' ? 'Reasonable review periods' : 'Long-term process support'}
@@ -146,18 +156,18 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
             </div>
 
             <div className="bg-slate-900/80 border border-white/5 rounded-xl p-3">
-              <span className="text-[10px] text-slate-400 uppercase block mb-1">Involvement</span>
+              <span className="text-xs sm:text-[10px] text-slate-400 uppercase block mb-1">Involvement</span>
               <span className="text-sm font-bold text-white capitalize">{owner.involvement.replace('_', ' ')}</span>
-              <span className="text-[10px] text-slate-500 block mt-0.5">
+              <span className="text-xs sm:text-[10px] text-slate-500 block mt-0.5">
                 {owner.involvement === 'micromanager' ? 'Demands specific transfers' :
                  owner.involvement === 'collaborative' ? 'Values consensus' : 'Gives director 100% autonomy'}
               </span>
             </div>
 
             <div className="bg-slate-900/80 border border-white/5 rounded-xl p-3">
-              <span className="text-[10px] text-slate-400 uppercase block mb-1">Recruitment Model</span>
+              <span className="text-xs sm:text-[10px] text-slate-400 uppercase block mb-1">Recruitment Model</span>
               <span className="text-sm font-bold text-amber-400 capitalize">{owner.recruitmentPhilosophy.replace('_', ' ')}</span>
-              <span className="text-[10px] text-slate-500 block mt-0.5">Core criteria for signings</span>
+              <span className="text-xs sm:text-[10px] text-slate-500 block mt-0.5">Core criteria for signings</span>
             </div>
           </div>
 
@@ -175,7 +185,7 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
                   </span>
                 ))}
               </div>
-              <p className="text-[11px] text-slate-400 mt-2">
+              <p className="text-xs sm:text-[11px] text-slate-400 mt-2">
                 Note: Signing players that contradict the owner's philosophy may trigger boardroom vetoes or disciplinary inquiries!
               </p>
             </div>
@@ -190,7 +200,7 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
               <span className="text-xs font-bold text-white uppercase tracking-wider block">
                 Club Sale & Takeover Risk
               </span>
-              <span className="text-[11px] text-slate-400">
+              <span className="text-xs sm:text-[11px] text-slate-400">
                 Consortium Rumors & Hostile Bids
               </span>
             </div>
@@ -219,7 +229,7 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
                 <Sparkles className="w-3.5 h-3.5 text-amber-400" />
                 Takeover Dynamics
               </div>
-              <p className="text-[11px] leading-relaxed text-slate-400">
+              <p className="text-xs sm:text-[11px] leading-relaxed text-slate-400">
                 If the club is sold, incoming owners often bring their own executive sporting team. A sudden takeover could reshape your transfer budget or terminate your contract even if on-pitch results are strong.
               </p>
             </div>
@@ -233,22 +243,23 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
       </div>
 
       {/* Interactive Board Funding Requests */}
-      <div className="bg-[#111827] border border-white/10 rounded-xl p-6">
+      <div className="bg-[#111827] border border-white/10 rounded-xl p-4 sm:p-6">
         <div className="border-b border-white/10 pb-3 mb-4">
           <h3 className="text-xs font-bold text-white uppercase tracking-wider">
             Formal Boardroom Petitions & Requests
           </h3>
-          <p className="text-xs text-slate-400 mt-0.5">
+          <p className="text-xs text-slate-400 mt-0.5 max-w-[75ch]">
             Submit formal funding appeals to the board. Approval depends on owner wealth, patience, and current board trust.
           </p>
         </div>
 
         {boardFeedback && (
-          <div className="p-3.5 mb-4 rounded-xl bg-slate-900 border border-amber-400/30 text-xs text-amber-300 flex items-center justify-between">
-            <span>{boardFeedback}</span>
+          <div className="p-3.5 mb-4 rounded-xl bg-slate-900 border border-amber-400/30 text-xs text-amber-300 flex items-center justify-between gap-2">
+            <span className="max-w-[75ch]">{boardFeedback}</span>
             <button 
               onClick={() => setBoardFeedback(null)}
-              className="text-slate-400 hover:text-white cursor-pointer ml-3"
+              aria-label="Dismiss feedback"
+              className="min-h-11 min-w-11 lg:min-h-0 lg:min-w-0 flex items-center justify-center rounded-lg text-slate-400 hover:text-white cursor-pointer shrink-0 active:scale-95"
             >
               <X className="w-4 h-4" />
             </button>
@@ -263,13 +274,13 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
               <span className="text-xs font-bold text-white block mb-1">
                 Request War Chest Expansion
               </span>
-              <p className="text-[11px] text-slate-400 leading-relaxed mb-3">
+              <p className="text-xs sm:text-[11px] text-slate-400 leading-relaxed mb-3 max-w-[75ch]">
                 Appeal to the chairman for an emergency injection into the transfer fee budget for the current window.
               </p>
             </div>
             <button
               onClick={() => handleRequest('transfer')}
-              className="w-full py-2 bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-bold text-amber-400 rounded-lg transition-all cursor-pointer"
+              className="w-full py-2 min-h-11 lg:min-h-0 bg-white/5 hover:bg-white/10 active:scale-[0.98] border border-white/10 text-xs font-bold text-amber-400 rounded-lg transition-all cursor-pointer"
             >
               Petition for Transfer Funds
             </button>
@@ -281,13 +292,13 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
               <span className="text-xs font-bold text-white block mb-1">
                 Request Wage Ceiling Hike
               </span>
-              <p className="text-[11px] text-slate-400 leading-relaxed mb-3">
+              <p className="text-xs sm:text-[11px] text-slate-400 leading-relaxed mb-3 max-w-[75ch]">
                 Raise the maximum allowable weekly wage budget to offer competitive terms to elite targets and key renewals.
               </p>
             </div>
             <button
               onClick={() => handleRequest('wage')}
-              className="w-full py-2 bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-bold text-emerald-400 rounded-lg transition-all cursor-pointer"
+              className="w-full py-2 min-h-11 lg:min-h-0 bg-white/5 hover:bg-white/10 active:scale-[0.98] border border-white/10 text-xs font-bold text-emerald-400 rounded-lg transition-all cursor-pointer"
             >
               Petition for Wage Hike
             </button>
@@ -299,13 +310,13 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
               <span className="text-xs font-bold text-white block mb-1">
                 Modernize Training Complex
               </span>
-              <p className="text-[11px] text-slate-400 leading-relaxed mb-3">
+              <p className="text-xs sm:text-[11px] text-slate-400 leading-relaxed mb-3 max-w-[75ch]">
                 Invest club reserves into advanced analytics, gym facilities, and medical recovery suites to boost player growth.
               </p>
             </div>
             <button
               onClick={() => handleRequest('facility')}
-              className="w-full py-2 bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-bold text-blue-400 rounded-lg transition-all cursor-pointer"
+              className="w-full py-2 min-h-11 lg:min-h-0 bg-white/5 hover:bg-white/10 active:scale-[0.98] border border-white/10 text-xs font-bold text-blue-400 rounded-lg transition-all cursor-pointer"
             >
               Commission Upgrade
             </button>

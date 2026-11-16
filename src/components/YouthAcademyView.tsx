@@ -8,6 +8,7 @@ import { Club, AcademyPlayer, PlayerPosition, Player } from '../types/game';
 import { GraduationCap, Award, Trash2, ArrowUpRight, ShieldCheck, Sparkles, AlertCircle, Users, CheckCircle2 } from 'lucide-react';
 import { sounds } from '../services/soundEffects';
 import { promoteAcademyPlayer, releaseAcademyPlayer } from '../services/simulationEngine';
+import { Modal } from './ui/Modal';
 
 interface YouthAcademyViewProps {
   club: Club;
@@ -90,7 +91,7 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
     <div className="space-y-6">
       
       {/* Academy Header Banner */}
-      <div className="bg-[#111827] border border-white/10 rounded-2xl p-6">
+      <div className="bg-[#111827] border border-white/10 rounded-2xl p-4 sm:p-6">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
           <div>
             <div className="flex items-center gap-2 text-xs font-bold text-amber-400 uppercase tracking-wider mb-1">
@@ -100,7 +101,7 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
             <h1 className="text-2xl lg:text-3xl font-extrabold text-white tracking-tight">
               {club.name} Youth Academy
             </h1>
-            <p className="text-slate-400 text-xs mt-1">
+            <p className="text-slate-400 text-xs mt-1 max-w-[75ch]">
               Scout emerging prodigies (ages 15–18), evaluate developmental momentum toward 99 rating, and promote standout talent to the senior roster.
             </p>
           </div>
@@ -108,19 +109,19 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
           {/* Quick Metrics */}
           <div className="flex flex-wrap items-center gap-2.5">
             <div className="px-3.5 py-2 bg-slate-900 border border-white/10 rounded-xl text-right">
-              <span className="text-[10px] text-slate-400 uppercase block">Active Prospects</span>
+              <span className="text-xs sm:text-[10px] text-slate-400 uppercase block">Active Prospects</span>
               <span className="text-base font-bold font-mono text-white tabular-nums">
                 {academyList.length} Players
               </span>
             </div>
             <div className="px-3.5 py-2 bg-slate-900 border border-white/10 rounded-xl text-right">
-              <span className="text-[10px] text-slate-400 uppercase block">Senior Squad Slots</span>
+              <span className="text-xs sm:text-[10px] text-slate-400 uppercase block">Senior Squad Slots</span>
               <span className={`text-base font-bold font-mono tabular-nums ${squadSlotsLeft === 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
                 {club.squad.length} / 25
               </span>
             </div>
             <div className="px-3.5 py-2 bg-slate-900 border border-white/10 rounded-xl text-right">
-              <span className="text-[10px] text-slate-400 uppercase block">Wage Room</span>
+              <span className="text-xs sm:text-[10px] text-slate-400 uppercase block">Wage Room</span>
               <span className="text-base font-bold font-mono text-amber-400 tabular-nums">
                 £{(wageSpace / 1000).toFixed(0)}k/wk
               </span>
@@ -131,8 +132,8 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
         {/* Top Prospect Spotlight Strip */}
         {topProspect && (
           <div className="mt-5 pt-4 border-t border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-            <div className="flex items-center gap-2">
-              <span className="text-amber-400 font-bold uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-amber-400 font-bold uppercase tracking-wider text-xs sm:text-[11px] flex items-center gap-1.5">
                 <Sparkles className="w-3.5 h-3.5" />
                 Featured Academy Prodigy:
               </span>
@@ -142,7 +143,7 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
               <span className="text-slate-500" aria-hidden="true">·</span>
               <span className="text-amber-300 font-mono font-medium">{topProspect.trait}</span>
             </div>
-            <div className="text-slate-400 font-mono text-[11px] flex items-center gap-2">
+            <div className="text-slate-400 font-mono text-xs sm:text-[11px] flex flex-wrap items-center gap-2">
               <span>Momentum:</span>
               <span className="text-emerald-400 font-bold">{topProspect.momentumTier}</span>
               <span className="text-slate-500">·</span>
@@ -154,7 +155,7 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
 
       {/* Action / Error Notification */}
       {feedback && (
-        <div className={`p-4 rounded-xl border text-xs flex items-center justify-between transition-all ${
+        <div className={`p-4 rounded-xl border text-xs flex items-center justify-between gap-2 transition-all ${
           feedback.type === 'error'
             ? 'bg-rose-950/40 border-rose-500/40 text-rose-300'
             : 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300'
@@ -169,7 +170,8 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
           </div>
           <button
             onClick={() => setFeedback(null)}
-            className="text-slate-400 hover:text-white cursor-pointer ml-3 font-mono"
+            aria-label="Dismiss notification"
+            className="min-h-11 min-w-11 lg:min-h-0 lg:min-w-0 flex items-center justify-center rounded-lg text-slate-400 hover:text-white cursor-pointer font-mono shrink-0"
           >
             ✕
           </button>
@@ -178,7 +180,7 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
 
       {/* Position Filter Segmented Controls */}
       <div className="flex items-center justify-between gap-4 flex-wrap">
-        <div className="flex items-center gap-1 p-1 bg-slate-900 border border-white/10 rounded-xl">
+        <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-900 border border-white/10 rounded-xl max-w-full">
           {(['ALL', 'GK', 'DEF', 'MID', 'FWD'] as const).map(pos => (
             <button
               key={pos}
@@ -186,7 +188,7 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
                 sounds.playClick();
                 setSelectedPos(pos);
               }}
-              className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap ${
+              className={`px-3.5 py-1.5 min-h-11 lg:min-h-0 text-xs font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap ${
                 selectedPos === pos
                   ? 'bg-amber-400 text-slate-950 shadow-sm'
                   : 'text-slate-400 hover:text-white hover:bg-white/5'
@@ -217,11 +219,11 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
           </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
           {filteredProspects.map(prospect => (
             <div
               key={prospect.id}
-              className="bg-[#111827] border border-white/10 hover:border-amber-400/40 rounded-xl p-5 transition-all flex flex-col justify-between space-y-4 group"
+              className="bg-[#111827] border border-white/10 hover:border-amber-400/40 rounded-xl p-4 sm:p-5 transition-all flex flex-col justify-between space-y-4 group"
             >
               <div>
                 {/* Header: Name, Position, Age */}
@@ -239,14 +241,14 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
                     </div>
                   </div>
 
-                  <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-white/5 border border-white/10 text-slate-300">
+                  <span className="px-2 py-0.5 rounded text-xs sm:text-[10px] font-mono font-bold bg-white/5 border border-white/10 text-slate-300">
                     {prospect.roleDetail}
                   </span>
                 </div>
 
                 {/* Trait Tag */}
                 <div className="mt-3">
-                  <span className="text-[11px] font-medium text-amber-400 block">
+                  <span className="text-xs sm:text-[11px] font-medium text-amber-400 block">
                     ★ {prospect.trait}
                   </span>
                 </div>
@@ -254,14 +256,14 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
                 {/* Ratings & Momentum Tier */}
                 <div className="mt-3.5 space-y-2 bg-slate-900/80 border border-white/5 rounded-lg p-3">
                   <div className="flex items-center justify-between text-xs font-mono">
-                    <span className="text-slate-400 text-[11px]">Current OVR</span>
+                    <span className="text-slate-400 text-xs sm:text-[11px]">Current OVR</span>
                     <span className="font-bold text-white text-sm tabular-nums">
-                      {prospect.overall} <span className="text-slate-500 text-[10px] font-normal">/ 99</span>
+                      {prospect.overall} <span className="text-slate-500 text-xs sm:text-[10px] font-normal">/ 99</span>
                     </span>
                   </div>
 
                   <div>
-                    <div className="flex items-center justify-between text-[11px] font-mono mb-1.5">
+                    <div className="flex items-center justify-between text-xs sm:text-[11px] font-mono mb-1.5">
                       <span className="text-slate-400">Development Momentum</span>
                       <span className={`font-bold ${
                         prospect.momentumTier === 'Generational Prodigy' ? 'text-emerald-400' :
@@ -283,7 +285,7 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
                         style={{ width: `${(prospect.overall / 99) * 100}%` }}
                       />
                     </div>
-                    <div className="flex justify-between items-center text-[9px] text-slate-500 font-mono mt-1">
+                    <div className="flex justify-between items-center text-xs sm:text-[9px] text-slate-500 font-mono mt-1">
                       <span>Rating: {prospect.overall}</span>
                       <span>Ceiling: 99 OVR</span>
                     </div>
@@ -297,11 +299,11 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
               </div>
 
               {/* Action Buttons */}
-              <div className="pt-3 border-t border-white/10 flex items-center justify-between gap-2">
+              <div className="pt-3 border-t border-white/10 flex flex-wrap items-center justify-between gap-2">
                 <button
                   onClick={() => handleRelease(prospect)}
                   title="Let go of academy player"
-                  className="px-2.5 py-1.5 text-xs text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors flex items-center gap-1 cursor-pointer font-medium"
+                  className="px-2.5 py-1.5 min-h-11 lg:min-h-0 text-xs text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-all active:scale-95 flex items-center gap-1 cursor-pointer font-medium"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                   <span>Release</span>
@@ -309,7 +311,7 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
 
                 <button
                   onClick={() => handleOpenPromote(prospect)}
-                  className="px-3.5 py-1.5 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-bold text-xs rounded-lg shadow-sm flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 whitespace-nowrap"
+                  className="flex-1 sm:flex-initial justify-center px-3.5 py-1.5 min-h-11 lg:min-h-0 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-bold text-xs rounded-lg shadow-sm flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 whitespace-nowrap"
                 >
                   <ArrowUpRight className="w-3.5 h-3.5" />
                   <span>Promote to Senior</span>
@@ -321,18 +323,22 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
       )}
 
       {/* Promotion Contract Dialog Modal */}
-      {selectedProspect && (
-        <div className="fixed inset-0 z-50 bg-[#070a0f]/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-md bg-[#111827] border border-amber-400/30 rounded-2xl p-6 shadow-2xl animate-in fade-in zoom-in-95 space-y-4">
-            
-            <div className="border-b border-white/10 pb-3">
-              <span className="text-[10px] font-bold text-amber-400 uppercase tracking-wider block">
+      <Modal
+        isOpen={Boolean(selectedProspect)}
+        onClose={() => setSelectedProspect(null)}
+        maxWidthClass="max-w-md"
+        borderClass="border-amber-400/30"
+        ariaLabel={selectedProspect ? `Promote ${selectedProspect.name}` : 'Promote Academy Prospect'}
+        header={
+          selectedProspect && (
+            <div>
+              <span className="text-xs sm:text-[10px] font-bold text-amber-400 uppercase tracking-wider block">
                 Academy Graduation Contract
               </span>
               <h3 className="text-xl font-bold text-white mt-0.5">
                 Promote {selectedProspect.name}
               </h3>
-              <div className="flex items-center gap-2 text-xs text-slate-400 mt-1 font-mono">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400 mt-1 font-mono">
                 <span>{selectedProspect.position}</span>
                 <span aria-hidden="true">·</span>
                 <span>Age {selectedProspect.age}</span>
@@ -340,7 +346,28 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
                 <span className="text-emerald-400 font-semibold">{selectedProspect.momentumTier} (Max 99 OVR)</span>
               </div>
             </div>
-
+          )
+        }
+        footer={
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <button
+              onClick={() => setSelectedProspect(null)}
+              className="px-4 py-2 min-h-11 lg:min-h-0 text-xs font-medium text-slate-400 hover:text-white transition-colors cursor-pointer"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleConfirmPromote}
+              disabled={club.squad.length >= 25 || promoteWage > wageSpace}
+              className="px-5 py-2 min-h-11 lg:min-h-0 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs rounded-lg shadow-md transition-all cursor-pointer"
+            >
+              Ratify Professional Contract
+            </button>
+          </div>
+        }
+      >
+        {selectedProspect && (
+          <div className="space-y-4">
             {/* Roster & Budget Check */}
             <div className="bg-slate-900 border border-white/10 rounded-xl p-3 text-xs space-y-2">
               <div className="flex items-center justify-between">
@@ -373,12 +400,13 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
                 <div className="flex items-center gap-2">
                   <input
                     type="number"
+                    inputMode="numeric"
                     min={500}
                     max={25000}
                     step={250}
                     value={promoteWage}
                     onChange={e => setPromoteWage(Number(e.target.value))}
-                    className="flex-1 px-3.5 py-2 bg-slate-900 border border-white/10 rounded-lg text-white font-mono text-sm focus:outline-none focus:border-amber-400"
+                    className="flex-1 min-h-11 lg:min-h-0 px-3.5 py-2 bg-slate-900 border border-white/10 rounded-lg text-white font-mono text-base md:text-sm focus:outline-none focus:border-amber-400"
                   />
                   <span className="text-xs text-slate-400 font-mono shrink-0">
                     £{(promoteWage / 1000).toFixed(1)}k/wk
@@ -390,13 +418,13 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
                 <label className="block text-xs font-semibold text-slate-300 mb-1">
                   Contract Duration
                 </label>
-                <div className="grid grid-cols-4 gap-2">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                   {[1, 2, 3, 5].map(yrs => (
                     <button
                       key={yrs}
                       type="button"
                       onClick={() => setPromoteYears(yrs)}
-                      className={`py-2 text-xs font-mono font-bold rounded-lg border transition-colors cursor-pointer ${
+                      className={`py-2 min-h-11 lg:min-h-0 text-xs font-mono font-bold rounded-lg border transition-colors cursor-pointer ${
                         promoteYears === yrs
                           ? 'bg-amber-400 text-slate-950 border-amber-400'
                           : 'bg-slate-900 border-white/10 text-slate-400 hover:text-white'
@@ -408,27 +436,9 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
                 </div>
               </div>
             </div>
-
-            {/* Modal Actions */}
-            <div className="pt-3 border-t border-white/10 flex items-center justify-end gap-2">
-              <button
-                onClick={() => setSelectedProspect(null)}
-                className="px-4 py-2 text-xs font-medium text-slate-400 hover:text-white transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleConfirmPromote}
-                disabled={club.squad.length >= 25 || promoteWage > wageSpace}
-                className="px-5 py-2 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs rounded-lg shadow-md transition-all cursor-pointer"
-              >
-                Ratify Professional Contract
-              </button>
-            </div>
-
           </div>
-        </div>
-      )}
+        )}
+      </Modal>
 
     </div>
   );

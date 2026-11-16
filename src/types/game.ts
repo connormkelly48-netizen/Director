@@ -7,6 +7,13 @@ export type LeagueTier = 1 | 2 | 3; // 1 = Premier League, 2 = Championship, 3 =
 
 export type PlayerPosition = 'GK' | 'DEF' | 'MID' | 'FWD';
 
+export const POSITION_ORDER: Record<PlayerPosition, number> = {
+  GK: 0,
+  DEF: 1,
+  MID: 2,
+  FWD: 3,
+};
+
 export type MoraleLevel = 'ecstatic' | 'happy' | 'content' | 'unhappy' | 'furious';
 
 export type GrowthMomentum = 'breakout' | 'rapid' | 'steady' | 'prime' | 'cooling';
@@ -33,6 +40,7 @@ export interface Player {
   clubId: string | null; // null for free agents
   isInjured?: boolean;
   injuryWeeks?: number;
+  effectiveOverall?: number;
 }
 
 export type OwnerWealth = 'frugal' | 'moderate' | 'wealthy' | 'oligarch';
@@ -44,6 +52,39 @@ export type RecruitmentPhilosophy =
   | 'moneyball_data' 
   | 'domestic_grit' 
   | 'trophies_now';
+
+export type FanExpectation = 
+  | 'Avoid Relegation' 
+  | 'Mid-Table Safety' 
+  | 'Play-off Push' 
+  | 'Automatic Promotion' 
+  | 'European Qualification' 
+  | 'Title Contender';
+
+export interface DatabaseMeta {
+  schemaVersion: number;
+  game: string;
+  startSeason: number;
+  notes: string;
+}
+
+export interface ClubData {
+  id: string;
+  name: string;
+  shortName: string;
+  tier: LeagueTier;
+  primaryColor: string;
+  secondaryColor: string;
+  stadium: string;
+  capacity: number;
+  balance: number; // In £
+  transferBudget: number; // In £
+  wageBudget: number; // In £/week
+  prestige: number; // 1 - 100
+  fanExpectation: FanExpectation;
+  ownerId: string;
+  managerId: string | null;
+}
 
 export interface Owner {
   id: string;
@@ -57,7 +98,16 @@ export interface Owner {
   takeoverRisk: number; // 0 - 100
   demandedTargets?: string[];
   description: string;
+  takeoverSourceId?: string;
+  status?: 'current' | 'takeover_candidate';
+  investorType?: string;
+  rumorWeek?: number;
 }
+
+export type TakeoverCandidate = Owner & {
+  investorType: 'Sovereign Investment Fund' | 'Tech Venture Capitalist' | 'American Private Equity' | 'Supporters Consortium';
+  rumorWeek: number;
+};
 
 export type TacticalStyle = 
   | 'High Gegenpress' 
@@ -82,6 +132,7 @@ export interface Manager {
   contractYears: number;
   clubId: string | null; // null = free agent
   profileSnippet: string;
+  leagueLevel?: 1 | 2 | 3;
 }
 
 export type ProspectTrait = 
@@ -107,24 +158,48 @@ export interface AcademyPlayer {
   trait: ProspectTrait;
   scoutReport: string;
   graduatingSeason: number;
+  clubId?: string;
 }
 
-export interface Club {
-  id: string;
-  name: string;
-  shortName: string;
-  tier: LeagueTier;
-  primaryColor: string;
-  secondaryColor: string;
-  stadium: string;
-  capacity: number;
-  balance: number; // In £
-  transferBudget: number; // In £
-  wageBudget: number; // In £/week
-  ownerId: string;
-  managerId: string | null;
+export type FormationId =
+  | '4-3-3'
+  | '4-2-3-1'
+  | '4-4-2'
+  | '4-4-1-1'
+  | '4-2-2-2'
+  | '4-1-4-1'
+  | '3-5-2'
+  | '3-4-3'
+  | '3-4-2-1'
+  | '5-3-2';
+
+export type SlotRole =
+  | 'GK'
+  | 'LB'
+  | 'RB'
+  | 'CB'
+  | 'LWB'
+  | 'RWB'
+  | 'CDM'
+  | 'CM'
+  | 'CAM'
+  | 'LM'
+  | 'RM'
+  | 'LW'
+  | 'RW'
+  | 'ST';
+
+export interface Lineup {
+  formation: FormationId;
+  slots: (string | null)[];
+  bench: string[];
+  auto: boolean;
+}
+
+export interface Club extends ClubData {
   squad: Player[];
   academy?: AcademyPlayer[];
+  lineup?: Lineup;
   played: number;
   won: number;
   drawn: number;
@@ -134,8 +209,15 @@ export interface Club {
   goalDifference: number;
   points: number;
   form: ('W' | 'D' | 'L')[];
-  prestige: number; // 1 - 100
-  fanExpectation: 'Avoid Relegation' | 'Mid-Table Safety' | 'Play-off Push' | 'Automatic Promotion' | 'European Qualification' | 'Title Contender';
+}
+
+export interface DatabaseSchema {
+  meta: DatabaseMeta;
+  clubs: ClubData[];
+  owners: Owner[];
+  managers: Manager[];
+  players: Player[];
+  academy: AcademyPlayer[];
 }
 
 export interface DelegationMatrix {
@@ -200,6 +282,14 @@ export interface BoardroomMemo {
   impactExplanation?: string;
 }
 
+export interface ManagerSigningEvent {
+  player: Player;
+  fee: number;
+  fromClubName: string;
+  managerName: string;
+  reason: string;
+}
+
 export interface WeeklyDigest {
   week: number;
   seasonYear: number;
@@ -210,6 +300,29 @@ export interface WeeklyDigest {
   dressingRoomSnippet: string;
   playerGrowthCount: number;
   playerDeclineCount: number;
+  managerSigning?: ManagerSigningEvent;
+  matchFormation?: FormationId;
+  matchTeamRating?: number;
+  lineupNotices?: string[];
+}
+
+export interface IncomingBid {
+  id: string;
+  playerId: string;
+  playerName: string;
+  playerPos: PlayerPosition;
+  playerOverall: number;
+  playerAge: number;
+  askingPrice: number;
+  offeredFee: number;
+  fromClubId: string; // The user's club (seller)
+  buyingClubId: string; // The AI club (buyer)
+  buyingClubName: string;
+  buyingClubTier: LeagueTier;
+  wageOffered: number;
+  status: 'pending' | 'accepted' | 'rejected';
+  createdWeek: number;
+  season: number;
 }
 
 export interface TransferOffer {
@@ -227,16 +340,6 @@ export interface TransferOffer {
   vetoReason?: string;
 }
 
-export interface TakeoverConsortium {
-  clubId: string;
-  investorName: string;
-  investorType: 'Sovereign Investment Fund' | 'Tech Venture Capitalist' | 'American Private Equity' | 'Supporters Consortium';
-  wealth: OwnerWealth;
-  patience: OwnerPatience;
-  involvement: OwnerInvolvement;
-  philosophy: RecruitmentPhilosophy;
-  rumorWeek: number;
-}
 
 export interface JobVacancy {
   clubId: string;
@@ -274,4 +377,82 @@ export interface SeasonSummary {
   prizeMoney: number;
   tvRevenue: number;
   graduatingProspects?: AcademyPlayer[];
+}
+
+export interface GameweekStandingsEntry {
+  clubId: string;
+  name: string;
+  shortName: string;
+  primaryColor: string;
+  tier: LeagueTier;
+  played: number;
+  won: number;
+  drawn: number;
+  lost: number;
+  goalsFor: number;
+  goalsAgainst: number;
+  goalDifference: number;
+  points: number;
+  form: ('W' | 'D' | 'L')[];
+}
+
+export interface GameweekRecord {
+  week: number;
+  seasonYear: number;
+  results: MatchResult[];
+  standingsSnapshot: Record<string, GameweekStandingsEntry>;
+}
+
+export interface TransferRecord {
+  id: string;
+  season: number; // e.g. 2026
+  week: number;
+  type: 'signing' | 'sale' | 'release' | 'renewal' | 'promotion';
+  playerId: string;
+  playerName: string;
+  position: PlayerPosition;
+  age: number;
+  overall: number;
+  fromClubId: string | null; // null = free agent or academy
+  toClubId: string | null; // null = released
+  fee: number; // in £ (severance paid for releases)
+  wage: number; // £/week
+  contractYears: number;
+  initiatedBy: 'director' | 'manager' | 'shared' | 'ai'; // shared = manager proposed and director approved; ai = rival AI club deal
+  note?: string;
+}
+
+export interface TransferProposal {
+  id: string;
+  createdWeek: number;
+  season: number;
+  kind: 'signing' | 'sale';
+  playerId: string;
+  playerName: string;
+  position: PlayerPosition;
+  age: number;
+  overall: number;
+  counterpartyClubId: string | null;
+  fee: number;
+  wage: number;
+  contractYears: number;
+  reason: string;
+  status: 'pending' | 'approved' | 'rejected' | 'expired';
+  expiresWeek: number;
+}
+
+export interface GameState {
+  saveVersion: number;
+  clubs: Club[];
+  owners: Owner[];
+  managers: Manager[];
+  freeAgents: Player[];
+  director: Director | null;
+  currentWeek: number;
+  seasonYear: number;
+  gameweekHistory: GameweekRecord[];
+  delegation: DelegationMatrix;
+  transferHistory: TransferRecord[];
+  transferProposals?: TransferProposal[];
+  incomingBids?: IncomingBid[];
 }

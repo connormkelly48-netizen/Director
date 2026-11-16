@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#111827" />
+      <stop offset="100%" stop-color="#0b0f17" />
+    </linearGradient>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fcd34d" />
+      <stop offset="55%" stop-color="#fbbf24" />
+      <stop offset="100%" stop-color="#d97706" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="108" fill="url(#bg)" />
+  <rect x="24" y="24" width="464" height="464" rx="88" fill="none" stroke="url(#gold)" stroke-opacity="0.35" stroke-width="8" />
+  <text
+    x="256"
+    y="352"
+    text-anchor="middle"
+    font-family="Plus Jakarta Sans, system-ui, -apple-system, BlinkMacSystemFont, sans-serif"
+    font-weight="800"
+    font-size="310"
+    fill="url(#gold)"
+  >B</text>
+</svg>

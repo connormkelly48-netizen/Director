@@ -27,12 +27,18 @@ export const ManagerView: React.FC<ManagerViewProps> = ({
 }) => {
   const [selectedFreeAgent, setSelectedFreeAgent] = useState<Manager | null>(null);
   const [filterStyle, setFilterStyle] = useState<string>('all');
+  const [searchQuery, setSearchQuery] = useState<string>('');
   const [feedback, setFeedback] = useState<string | null>(null);
 
-  const freeAgents = allManagers.filter(m => m.clubId === null || m.clubId === undefined);
+  // Query all available managers where clubId === null
+  const freeAgents = allManagers.filter(m => m.clubId === null);
+
   const filteredFreeAgents = freeAgents.filter(m => {
-    if (filterStyle === 'all') return true;
-    return m.tacticalStyle === filterStyle;
+    if (filterStyle !== 'all' && m.tacticalStyle !== filterStyle) return false;
+    if (searchQuery && !m.name.toLowerCase().includes(searchQuery.toLowerCase()) && !m.nationality.toLowerCase().includes(searchQuery.toLowerCase())) {
+      return false;
+    }
+    return true;
   });
 
   // Handle sacking the current manager
@@ -119,7 +125,7 @@ export const ManagerView: React.FC<ManagerViewProps> = ({
     <div className="space-y-6">
       
       {/* Header */}
-      <div className="bg-[#111827] border border-white/10 rounded-2xl p-6">
+      <div className="bg-[#111827] border border-white/10 rounded-2xl p-4 sm:p-6">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
             <div className="flex items-center gap-2 text-xs font-bold text-amber-400 uppercase tracking-wider mb-1">
@@ -129,7 +135,7 @@ export const ManagerView: React.FC<ManagerViewProps> = ({
             <h1 className="text-2xl lg:text-3xl font-extrabold text-white tracking-tight">
               Head Coach Suite & Manager Market
             </h1>
-            <p className="text-slate-400 text-xs mt-1">
+            <p className="text-slate-400 text-xs mt-1 max-w-[75ch]">
               Evaluate your current tactician, manage dressing room harmony, or recruit from the elite free agent market.
             </p>
           </div>
@@ -137,27 +143,33 @@ export const ManagerView: React.FC<ManagerViewProps> = ({
       </div>
 
       {feedback && (
-        <div className="p-4 rounded-xl bg-slate-900 border border-amber-400/30 text-xs text-amber-300 flex items-center justify-between animate-in fade-in">
-          <span>{feedback}</span>
-          <button onClick={() => setFeedback(null)} className="text-slate-400 hover:text-white cursor-pointer ml-3">✕</button>
+        <div className="p-4 rounded-xl bg-slate-900 border border-amber-400/30 text-xs text-amber-300 flex items-center justify-between gap-2 animate-in fade-in">
+          <span className="max-w-[75ch]">{feedback}</span>
+          <button
+            onClick={() => setFeedback(null)}
+            aria-label="Dismiss feedback"
+            className="min-h-11 min-w-11 lg:min-h-0 lg:min-w-0 flex items-center justify-center rounded-lg text-slate-400 hover:text-white cursor-pointer shrink-0 active:scale-95"
+          >
+            ✕
+          </button>
         </div>
       )}
 
       {/* Incumbent Manager Spotlight */}
-      <div className="bg-[#111827] border border-white/10 rounded-xl p-6">
-        <div className="border-b border-white/10 pb-3 mb-4 flex items-center justify-between">
+      <div className="bg-[#111827] border border-white/10 rounded-xl p-4 sm:p-6">
+        <div className="border-b border-white/10 pb-3 mb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
             <span className="text-xs font-bold text-white uppercase tracking-wider block">
               Current Head Coach in Dugout
             </span>
-            <span className="text-[11px] text-slate-400">
+            <span className="text-xs sm:text-[11px] text-slate-400">
               Contract terms, tactical style, and relationship with Sporting Director
             </span>
           </div>
           {currentManager && (
             <button
               onClick={handleSackManager}
-              className="px-3.5 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-300 font-bold text-xs rounded-lg flex items-center gap-1.5 transition-all cursor-pointer"
+              className="w-full sm:w-auto px-3.5 py-2 min-h-11 lg:min-h-0 bg-rose-500/10 hover:bg-rose-500/20 active:scale-[0.98] border border-rose-500/30 text-rose-300 font-bold text-xs rounded-lg flex items-center justify-center gap-1.5 transition-all cursor-pointer"
             >
               <UserX className="w-3.5 h-3.5" />
               <span>Terminate Contract</span>
@@ -169,30 +181,30 @@ export const ManagerView: React.FC<ManagerViewProps> = ({
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             
             <div className="lg:col-span-2 space-y-4">
-              <div className="flex items-start justify-between">
+              <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <h2 className="text-2xl font-extrabold text-white">{currentManager.name}</h2>
+                  <h2 className="text-xl sm:text-2xl font-extrabold text-white">{currentManager.name}</h2>
                   <span className="text-xs text-slate-400 font-medium">
                     {currentManager.nationality} · Age {currentManager.age} · {currentManager.tacticalStyle}
                   </span>
                 </div>
-                <div className="text-right">
+                <div className="text-left sm:text-right">
                   <span className="text-xs text-slate-400 block font-mono">Reputation</span>
                   <span className="text-xl font-bold font-mono text-amber-400">{currentManager.reputation} / 100</span>
                 </div>
               </div>
 
-              <p className="text-xs leading-relaxed text-slate-300 italic font-serif bg-slate-900/60 border border-white/5 p-3.5 rounded-xl">
+              <p className="text-xs leading-relaxed text-slate-300 italic font-serif bg-slate-900/60 border border-white/5 p-3.5 rounded-xl max-w-[75ch]">
                 "{currentManager.profileSnippet}"
               </p>
 
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div className="bg-slate-900/80 border border-white/5 rounded-xl p-3">
-                  <span className="text-[10px] text-slate-400 uppercase block mb-1">Preferred System</span>
+                  <span className="text-xs sm:text-[10px] text-slate-400 uppercase block mb-1">Preferred System</span>
                   <span className="text-xs font-bold text-white font-mono">{currentManager.preferredFormation}</span>
                 </div>
                 <div className="bg-slate-900/80 border border-white/5 rounded-xl p-3">
-                  <span className="text-[10px] text-slate-400 uppercase block mb-1">Control Appetite</span>
+                  <span className="text-xs sm:text-[10px] text-slate-400 uppercase block mb-1">Control Appetite</span>
                   <span className={`text-xs font-bold capitalize ${
                     currentManager.controlDesire === 'autocrat' ? 'text-rose-400' :
                     currentManager.controlDesire === 'collaborator' ? 'text-amber-400' : 'text-emerald-400'
@@ -201,7 +213,7 @@ export const ManagerView: React.FC<ManagerViewProps> = ({
                   </span>
                 </div>
                 <div className="bg-slate-900/80 border border-white/5 rounded-xl p-3">
-                  <span className="text-[10px] text-slate-400 uppercase block mb-1">Contract Remainder</span>
+                  <span className="text-xs sm:text-[10px] text-slate-400 uppercase block mb-1">Contract Remainder</span>
                   <span className="text-xs font-bold text-white font-mono">{currentManager.contractYears} Years (£{(currentManager.wage / 1000).toFixed(0)}k/wk)</span>
                 </div>
               </div>
@@ -214,7 +226,7 @@ export const ManagerView: React.FC<ManagerViewProps> = ({
                   <Flame className="w-4 h-4 text-amber-400" />
                   Chemistry with Sporting Director
                 </span>
-                <span className="text-[11px] text-slate-400 block mb-3">
+                <span className="text-xs sm:text-[11px] text-slate-400 block mb-3">
                   Influenced by results and whether you respect delegated responsibilities.
                 </span>
 
@@ -239,7 +251,7 @@ export const ManagerView: React.FC<ManagerViewProps> = ({
                   </div>
                 </div>
 
-                <p className="text-[11px] text-slate-400 leading-relaxed">
+                <p className="text-xs sm:text-[11px] text-slate-400 leading-relaxed">
                   {currentManager.trustInDirector > 70
                     ? 'The coach feels fully supported and respects your strategic squad additions.'
                     : currentManager.trustInDirector > 40
@@ -248,7 +260,7 @@ export const ManagerView: React.FC<ManagerViewProps> = ({
                 </p>
               </div>
 
-              <div className="pt-3 border-t border-white/10 text-[10px] text-slate-500">
+              <div className="pt-3 border-t border-white/10 text-xs sm:text-[10px] text-slate-500">
                 Severance Value: £{((currentManager.wage * 52 * Math.max(1, currentManager.contractYears)) / 1000000).toFixed(2)}M
               </div>
             </div>
@@ -266,24 +278,37 @@ export const ManagerView: React.FC<ManagerViewProps> = ({
       </div>
 
       {/* Available Managers Market */}
-      <div className="bg-[#111827] border border-white/10 rounded-xl p-6">
+      <div className="bg-[#111827] border border-white/10 rounded-xl p-4 sm:p-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-white/10 pb-3 mb-4">
           <div>
-            <h3 className="text-xs font-bold text-white uppercase tracking-wider">
-              Available Free Agent Managers Market
-            </h3>
-            <span className="text-[11px] text-slate-400">
-              Unattached world-class managers and tactical specialists available for hire
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="text-xs font-bold text-white uppercase tracking-wider">
+                Available Free Agent Managers Market
+              </h3>
+              <span className="px-2 py-0.5 rounded-full bg-amber-400/10 border border-amber-400/20 text-amber-400 font-mono text-xs sm:text-[10px] font-bold">
+                {filteredFreeAgents.length} / {freeAgents.length} Available
+              </span>
+            </div>
+            <span className="text-xs sm:text-[11px] text-slate-400">
+              Unattached world-class managers and tactical specialists available for hire (strictly clubId === null)
             </span>
           </div>
 
-          {/* Tactical Style Filter */}
-          <div className="flex items-center gap-2">
+          {/* Search and Tactical Style Filter */}
+          <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+            <input
+              type="search"
+              inputMode="search"
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              placeholder="Search manager..."
+              className="px-3 py-2 min-h-11 lg:min-h-0 text-base md:text-xs bg-slate-900 border border-white/10 rounded-lg text-white placeholder-slate-500 w-full sm:w-44 focus:sm:w-52 transition-all"
+            />
             <span className="text-xs text-slate-400">Style:</span>
             <select
               value={filterStyle}
               onChange={e => setFilterStyle(e.target.value)}
-              className="px-2.5 py-1 text-xs bg-slate-900 border border-white/10 rounded-lg text-white"
+              className="px-3 py-2 min-h-11 lg:min-h-0 text-base md:text-xs bg-slate-900 border border-white/10 rounded-lg text-white flex-1 sm:flex-none"
             >
               <option value="all">All Tactical Styles</option>
               <option value="High Gegenpress">High Gegenpress</option>
@@ -296,7 +321,7 @@ export const ManagerView: React.FC<ManagerViewProps> = ({
         </div>
 
         {/* Manager Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-4">
           {filteredFreeAgents.map(mgr => (
             <div 
               key={mgr.id}
@@ -306,7 +331,7 @@ export const ManagerView: React.FC<ManagerViewProps> = ({
                 <div className="flex items-start justify-between mb-1.5">
                   <div>
                     <h4 className="text-sm font-bold text-white">{mgr.name}</h4>
-                    <span className="text-[11px] text-slate-400 block">{mgr.nationality} · Age {mgr.age}</span>
+                    <span className="text-xs sm:text-[11px] text-slate-400 block">{mgr.nationality} · Age {mgr.age}</span>
                   </div>
                   <span className="text-xs font-bold font-mono px-2 py-0.5 bg-amber-400/10 border border-amber-400/20 text-amber-400 rounded">
                     Rep {mgr.reputation}
@@ -333,14 +358,14 @@ export const ManagerView: React.FC<ManagerViewProps> = ({
                   </div>
                 </div>
 
-                <p className="text-[11px] text-slate-400 leading-snug italic font-serif mb-3 line-clamp-2">
+                <p className="text-xs sm:text-[11px] text-slate-400 leading-snug italic font-serif mb-3 line-clamp-2">
                   "{mgr.profileSnippet}"
                 </p>
               </div>
 
               <button
                 onClick={() => handleHireManager(mgr)}
-                className="w-full py-2 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-bold text-xs rounded-lg transition-all cursor-pointer active:scale-95 flex items-center justify-center gap-1.5"
+                className="w-full py-2 min-h-11 lg:min-h-0 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-bold text-xs rounded-lg transition-all cursor-pointer active:scale-95 flex items-center justify-center gap-1.5"
               >
                 <Check className="w-3.5 h-3.5" />
                 <span>Offer Contract ({mgr.name.split(' ')[0]})</span>
