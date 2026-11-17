@@ -4,8 +4,8 @@
  */
 
 import React, { useState } from 'react';
-import { SeasonSummary, Club, Director, Owner, AcademyPlayer } from '../types/game';
-import { Trophy, ArrowRight, GraduationCap, Trash2, ArrowUpRight, CheckCircle2 } from 'lucide-react';
+import { SeasonSummary, Club, Director, Owner, Manager, AcademyPlayer, LeagueTier, TransferRecord } from '../types/game';
+import { Trophy, ArrowRight, GraduationCap, Trash2, ArrowUpRight, CheckCircle2, Clock } from 'lucide-react';
 import { sounds } from '../services/soundEffects';
 import { promoteAcademyPlayer, releaseAcademyPlayer } from '../services/simulationEngine';
 import { Modal } from './ui/Modal';
@@ -15,6 +15,8 @@ interface SeasonFinaleModalProps {
   playerClub: Club | undefined;
   director: Director;
   owner: Owner | undefined;
+  manager?: Manager;
+  transferHistory?: TransferRecord[];
   onAdvanceToNextSeason: (stayAtClub: boolean) => void;
   onUpdateClub?: (updatedClub: Club) => void;
   onBackToMainMenu?: () => void;
@@ -23,14 +25,24 @@ interface SeasonFinaleModalProps {
 export const SeasonFinaleModal: React.FC<SeasonFinaleModalProps> = ({
   summary,
   playerClub,
+  manager,
+  transferHistory = [],
   onAdvanceToNextSeason,
   onUpdateClub,
   onBackToMainMenu,
 }) => {
-  const [activeTab, setActiveTab] = useState<'overview' | 'academy'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'retirements' | 'academy'>('overview');
+  const [retirementFilter, setRetirementFilter] = useState<'ALL' | 'CLUB' | LeagueTier>('ALL');
   const [feedback, setFeedback] = useState<string | null>(null);
 
   const academyList: AcademyPlayer[] = playerClub?.academy || summary.graduatingProspects || [];
+  const retirementsList = summary.retirements || [];
+  const topGraduates = summary.topLeagueGraduates || [];
+  const filteredRetirements = retirementsList.filter(r => {
+    if (retirementFilter === 'ALL') return true;
+    if (retirementFilter === 'CLUB') return r.isUserClub;
+    return r.clubTier === retirementFilter;
+  });
   const currentSquadWages = playerClub?.squad.reduce((acc, p) => acc + p.wage, 0) || 0;
   const wageSpace = playerClub ? Math.max(0, playerClub.wageBudget - currentSquadWages) : 0;
   const squadSlotsLeft = playerClub ? Math.max(0, 25 - playerClub.squad.length) : 0;
@@ -38,7 +50,7 @@ export const SeasonFinaleModal: React.FC<SeasonFinaleModalProps> = ({
   const handlePromote = (prospect: AcademyPlayer) => {
     if (!playerClub || !onUpdateClub) return;
     const baseWage = playerClub.tier === 1 ? 5000 : playerClub.tier === 2 ? 2500 : 1200;
-    const result = promoteAcademyPlayer(playerClub, prospect.id, baseWage, 3);
+    const result = promoteAcademyPlayer(playerClub, prospect.id, baseWage, 3, manager);
 
     if (!result.success) {
       sounds.playCrisis();
@@ -101,6 +113,21 @@ export const SeasonFinaleModal: React.FC<SeasonFinaleModalProps> = ({
               type="button"
               onClick={() => {
                 sounds.playClick();
+                setActiveTab('retirements');
+              }}
+              className={`min-h-11 lg:min-h-0 px-3.5 sm:px-4 py-2 text-xs font-bold rounded-lg border transition-all active:scale-95 cursor-pointer flex items-center gap-1.5 ${
+                activeTab === 'retirements'
+                  ? 'bg-amber-400 text-slate-950 border-amber-400 shadow-sm'
+                  : 'bg-slate-900 border-white/10 text-slate-400 hover:text-white'
+              }`}
+            >
+              <Clock className="w-3.5 h-3.5" />
+              <span>Retirements & Graduates ({retirementsList.length})</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                sounds.playClick();
                 setActiveTab('academy');
               }}
               className={`min-h-11 lg:min-h-0 px-3.5 sm:px-4 py-2 text-xs font-bold rounded-lg border transition-all active:scale-95 cursor-pointer flex items-center gap-1.5 ${
@@ -119,7 +146,7 @@ export const SeasonFinaleModal: React.FC<SeasonFinaleModalProps> = ({
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
           <div className="text-xs text-slate-400">
             <span>Next Campaign: <strong className="text-white font-mono">{summary.seasonYear + 1}/{summary.seasonYear + 2} Season</strong></span>
-            <span className="block text-xs sm:text-[11px] text-slate-500">Player ages will increment by 1 year, unpromoted 19yo prospects leave, and new intake arrives.</span>
+            <span className="block text-xs sm:text-[11px] text-slate-500">Retiring veterans exit football, remaining players age +1 yr, AI academies replenish, and new intakes arrive.</span>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 sm:gap-3 w-full sm:w-auto">
@@ -232,11 +259,74 @@ export const SeasonFinaleModal: React.FC<SeasonFinaleModalProps> = ({
                 <div>
                   <span className="text-xs sm:text-[10px] text-slate-400 uppercase block">Director Pedigree</span>
                   <span className="text-base font-bold text-blue-400">
-                    {summary.directorGrade === 'A+' ? '+8 Reputation' : summary.directorGrade === 'A' ? '+5 Reputation' : summary.directorGrade === 'B' ? '+2 Reputation' : '-8 Reputation'}
+                    {summary.directorGrade === 'A+'
+                      ? '+8 Reputation'
+                      : summary.directorGrade === 'A'
+                      ? '+5 Reputation'
+                      : summary.directorGrade === 'B'
+                      ? '+2 Reputation'
+                      : summary.directorGrade === 'C'
+                      ? '-2 Reputation'
+                      : summary.directorGrade === 'D'
+                      ? '-5 Reputation'
+                      : '-10 Reputation'}
                   </span>
                 </div>
               </div>
             </div>
+
+            {/* Head Coach Season Activity Summary */}
+            {playerClub && (() => {
+              const coachSeasonDeals = transferHistory.filter(
+                tr =>
+                  tr.season === summary.seasonYear &&
+                  (tr.initiatedBy === 'manager' || tr.initiatedBy === 'shared') &&
+                  (tr.toClubId === playerClub.id || tr.fromClubId === playerClub.id)
+              );
+              if (coachSeasonDeals.length === 0) return null;
+              const signings = coachSeasonDeals.filter(tr => tr.type === 'signing' && tr.toClubId === playerClub.id);
+              const sales = coachSeasonDeals.filter(tr => tr.type === 'sale' && tr.fromClubId === playerClub.id);
+              const renewals = coachSeasonDeals.filter(tr => tr.type === 'renewal' && tr.toClubId === playerClub.id);
+              const promotions = coachSeasonDeals.filter(tr => tr.type === 'promotion' && tr.toClubId === playerClub.id);
+
+              return (
+                <div className="bg-slate-900/80 border border-white/10 rounded-xl p-4 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/5 pb-2">
+                    <span className="text-xs font-bold text-white uppercase tracking-wider">
+                      Head Coach Business ({summary.seasonYear}/{summary.seasonYear + 1})
+                    </span>
+                    <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
+                      {signings.length > 0 && <span className="text-emerald-400">{signings.length} Signed</span>}
+                      {sales.length > 0 && <span className="text-blue-400">{sales.length} Sold</span>}
+                      {renewals.length > 0 && <span className="text-amber-300">{renewals.length} Renewed</span>}
+                      {promotions.length > 0 && <span className="text-purple-300">{promotions.length} Promoted</span>}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-40 overflow-y-auto pr-1">
+                    {coachSeasonDeals.slice(0, 12).map(tr => (
+                      <div
+                        key={tr.id}
+                        className="bg-slate-950/60 border border-white/5 rounded-lg px-3 py-2 flex items-center justify-between gap-2 text-xs"
+                      >
+                        <div className="min-w-0">
+                          <span className="font-bold text-white block truncate">{tr.playerName}</span>
+                          <span className="text-[11px] text-slate-400 font-mono">
+                            {tr.type.toUpperCase()} · {tr.position} · {tr.overall} OVR · Wk {tr.week}
+                          </span>
+                        </div>
+                        <span className="font-mono font-bold text-amber-400 shrink-0">
+                          {tr.type === 'renewal'
+                            ? `${tr.contractYears}y`
+                            : tr.fee > 0
+                              ? `£${(tr.fee / 1000000).toFixed(1)}M`
+                              : 'Free'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* Division Honor Roll: Champions & Movement */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -326,7 +416,139 @@ export const SeasonFinaleModal: React.FC<SeasonFinaleModalProps> = ({
           </div>
         )}
 
-        {/* Tab 2: Academy Graduation Review */}
+        {/* Tab 2: Retirements & Generational Turnover */}
+        {activeTab === 'retirements' && (
+          <div className="space-y-5">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+              <div className="bg-slate-900 border border-white/10 rounded-xl p-3.5">
+                <span className="text-slate-400 block">Players Retiring (33–42)</span>
+                <span className="text-xl font-extrabold font-mono text-white tabular-nums mt-0.5 block">
+                  {retirementsList.length}
+                </span>
+              </div>
+              <div className="bg-slate-900 border border-white/10 rounded-xl p-3.5">
+                <span className="text-slate-400 block">My Club Retirees</span>
+                <span className="text-xl font-extrabold font-mono text-amber-400 tabular-nums mt-0.5 block">
+                  {retirementsList.filter(r => r.isUserClub).length}
+                </span>
+              </div>
+              <div className="bg-slate-900 border border-white/10 rounded-xl p-3.5">
+                <span className="text-slate-400 block">League Academy Promotions</span>
+                <span className="text-xl font-extrabold font-mono text-emerald-400 tabular-nums mt-0.5 block">
+                  {summary.totalLeaguePromotions ?? topGraduates.length}
+                </span>
+              </div>
+            </div>
+
+            {/* Retirements Filter & List */}
+            <div className="bg-slate-900/80 border border-white/10 rounded-xl p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-bold text-white">End-of-Season Retirements Roll</h3>
+                  <p className="text-xs text-slate-400">
+                    Veterans hanging up their boots across all three divisions (ages 33–42; goalkeepers retire later on average).
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-950 border border-white/10 rounded-lg">
+                  {([
+                    { id: 'ALL', label: 'All' },
+                    { id: 'CLUB', label: 'My Club' },
+                    { id: 1, label: 'Tier 1' },
+                    { id: 2, label: 'Tier 2' },
+                    { id: 3, label: 'Tier 3' },
+                  ] as const).map(opt => (
+                    <button
+                      key={String(opt.id)}
+                      type="button"
+                      onClick={() => setRetirementFilter(opt.id)}
+                      className={`px-2.5 py-1 min-h-9 lg:min-h-0 text-xs font-semibold rounded transition-colors cursor-pointer whitespace-nowrap ${
+                        retirementFilter === opt.id
+                          ? 'bg-amber-400 text-slate-950'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {filteredRetirements.length === 0 ? (
+                <div className="py-6 text-center text-xs text-slate-400">
+                  No players in this filter are retiring at the conclusion of Season {summary.seasonYear}/{summary.seasonYear + 1}.
+                </div>
+              ) : (
+                <div className="divide-y divide-white/5 max-h-72 overflow-y-auto pr-1">
+                  {filteredRetirements.slice(0, 60).map(ret => (
+                    <div
+                      key={ret.playerId}
+                      className="py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className={`font-bold ${ret.isUserClub ? 'text-amber-300' : 'text-white'}`}>
+                            {ret.name}
+                          </span>
+                          <span className="text-slate-500 font-mono">
+                            {ret.position} · Age {ret.age} · OVR {ret.overall}
+                          </span>
+                          {ret.isUserClub && (
+                            <span className="text-amber-400 font-semibold">· Your Club</span>
+                          )}
+                        </div>
+                        <div className="text-slate-400 mt-0.5">
+                          {ret.clubName} · {ret.nationality}
+                        </div>
+                      </div>
+
+                      <div className="text-right font-mono tabular-nums text-slate-300 shrink-0">
+                        {ret.appearances} apps · {ret.position === 'GK' ? `${ret.cleanSheets} CS` : `${ret.goals}G ${ret.assists}A`}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* League-Wide Academy Graduates */}
+            <div className="bg-slate-900/80 border border-white/10 rounded-xl p-4 space-y-3">
+              <div>
+                <h3 className="text-sm font-bold text-white">Notable Pyramid Academy Graduates</h3>
+                <p className="text-xs text-slate-400">
+                  Top youth prospects promoted into senior football across the Premier League, Championship, and League One this season.
+                </p>
+              </div>
+
+              {topGraduates.length === 0 ? (
+                <p className="text-xs text-slate-400 py-2">
+                  Clubs will evaluate and promote fresh academy graduates during the upcoming summer transition.
+                </p>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                  {topGraduates.map(grad => (
+                    <div
+                      key={`${grad.playerId}_${grad.clubId}`}
+                      className="bg-slate-950/60 border border-white/5 rounded-lg px-3 py-2.5 flex items-center justify-between gap-2 text-xs"
+                    >
+                      <div className="min-w-0">
+                        <span className="font-bold text-white block truncate">{grad.playerName}</span>
+                        <span className="text-slate-400">
+                          {grad.clubName} · {grad.position} · Age {grad.age}
+                        </span>
+                      </div>
+                      <span className="font-mono font-extrabold text-emerald-400 tabular-nums shrink-0">
+                        {grad.overall} OVR
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Tab 3: Academy Graduation Review */}
         {activeTab === 'academy' && (
           <div className="space-y-4">
             <div className="bg-slate-900 border border-white/10 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">

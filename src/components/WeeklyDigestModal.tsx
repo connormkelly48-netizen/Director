@@ -5,7 +5,7 @@
 
 import React from 'react';
 import { WeeklyDigest, Club, Director, Owner, Manager } from '../types/game';
-import { Newspaper, Building2, TrendingUp, AlertTriangle, ArrowRight, Activity, UserPlus } from 'lucide-react';
+import { Newspaper, Building2, TrendingUp, AlertTriangle, ArrowRight, Activity, UserPlus, GraduationCap } from 'lucide-react';
 import { sounds } from '../services/soundEffects';
 import { Modal } from './ui/Modal';
 
@@ -229,7 +229,7 @@ export const WeeklyDigestModal: React.FC<WeeklyDigestModalProps> = ({
                 {match.events.map((e, idx) => (
                   <span key={idx} className="flex items-center gap-1 font-mono">
                     <span className="text-amber-400">{e.minute}'</span>
-                    <span>{e.type === 'goal' ? '⚽' : '🟨'}</span>
+                    <span>{e.type === 'goal' ? '⚽' : e.type === 'injury' ? '🏥' : e.type === 'red_card' ? '🟥' : '🟨'}</span>
                     <span className="text-slate-200 font-sans">{e.player}</span>
                   </span>
                 ))}
@@ -321,6 +321,55 @@ export const WeeklyDigestModal: React.FC<WeeklyDigestModalProps> = ({
           </div>
 
         </div>
+
+        {/* Academy & Retirements Wire */}
+        {digest.academyWire && digest.academyWire.length > 0 && (
+          <div className="bg-slate-900/60 border border-white/10 rounded-xl p-3.5 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+                <GraduationCap className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span>Academy & Retirements Wire</span>
+              </span>
+              <span className="text-xs text-slate-400 font-mono tabular-nums">
+                {digest.academyWire.length} updates
+              </span>
+            </div>
+
+            <div className="divide-y divide-white/5">
+              {digest.academyWire.map(item => (
+                <div key={item.id} className="py-2 first:pt-0 last:pb-0 flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 text-xs">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span
+                        className={`font-semibold ${
+                          item.kind === 'retirement_notice'
+                            ? 'text-rose-400'
+                            : item.kind === 'poach'
+                              ? 'text-amber-400'
+                              : 'text-emerald-400'
+                        }`}
+                      >
+                        {item.kind === 'retirement_notice'
+                          ? 'Retiring Season End'
+                          : item.kind === 'poach'
+                            ? 'Youth Poach'
+                            : 'Academy Promotion'}
+                      </span>
+                      <span className="text-slate-600" aria-hidden="true">·</span>
+                      <span className="font-bold text-white">{item.playerName}</span>
+                      <span className="text-slate-500 font-mono tabular-nums">
+                        {item.position} · Age {item.age} · OVR {item.overall}
+                      </span>
+                    </div>
+                    <p className="text-slate-400 mt-0.5">
+                      {item.clubName} — {item.detail}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </Modal>
   );

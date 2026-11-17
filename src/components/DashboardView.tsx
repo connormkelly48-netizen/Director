@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { Club, Director, Owner, Manager, LeagueTier, GameweekRecord } from '../types/game';
+import { Club, Director, Owner, Manager, LeagueTier, GameweekRecord, Player, TransferRecord } from '../types/game';
 import { 
   Shield, 
   TrendingUp, 
@@ -23,10 +23,14 @@ import {
   ArrowDown,
   ChevronDown,
   ChevronUp,
+  Briefcase,
 } from 'lucide-react';
 import { sounds } from '../services/soundEffects';
 import { FORMATIONS } from '../data/formations';
 import { computeTeamRating, resolveClubLineup } from '../utils/lineup';
+import { computeTransferROI } from '../utils/transferRoi';
+import { TransferROICard } from './dashboard/TransferROICard';
+import { TransferROIModal } from './dashboard/TransferROIModal';
 
 interface DashboardViewProps {
   club: Club | undefined;
@@ -34,6 +38,8 @@ interface DashboardViewProps {
   owner: Owner | undefined;
   manager: Manager | undefined;
   allClubs: Club[];
+  freeAgents?: Player[];
+  transferHistory?: TransferRecord[];
   currentWeek: number;
   seasonYear: number;
   gameweekHistory?: GameweekRecord[];
@@ -269,6 +275,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   owner,
   manager,
   allClubs,
+  freeAgents = [],
+  transferHistory = [],
   currentWeek,
   seasonYear,
   gameweekHistory = [],
@@ -276,10 +284,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onAdvanceWeek,
   isSimulating,
 }) => {
+  const isSeasonComplete = currentWeek > 46;
+  const maxWeek = Math.max(1, Math.min(46, currentWeek));
+  const displayWeek = Math.min(46, currentWeek);
+
   // Selected League Tier: dynamically defaults to user's active club tier
   const [selectedTier, setSelectedTier] = useState<LeagueTier>(club?.tier || 1);
   // Selected Gameweek for historical inspection
-  const [selectedWeek, setSelectedWeek] = useState<number>(currentWeek);
+  const [selectedWeek, setSelectedWeek] = useState<number>(maxWeek);
   // Full division table expansion toggle
   const [isTableExpanded, setIsTableExpanded] = useState<boolean>(false);
   // Fixtures view filter: 'all' or 'director'
@@ -288,6 +300,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const [expandedClubId, setExpandedClubId] = useState<string | null>(null);
   const [standingsSortField, setStandingsSortField] = useState<'rank' | 'name' | 'played' | 'won' | 'drawn' | 'lost' | 'goalDifference' | 'points'>('rank');
   const [standingsSortAsc, setStandingsSortAsc] = useState<boolean>(true);
+  const [isRoiModalOpen, setIsRoiModalOpen] = useState<boolean>(false);
 
   // Dynamically follow the user's active club tier:
   // If the user changes jobs to a different tier, or their club gets promoted/relegated,
@@ -300,7 +313,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   // Sync selected week when currentWeek increments during simulation
   useEffect(() => {
-    setSelectedWeek(currentWeek);
+    setSelectedWeek(Math.max(1, Math.min(46, currentWeek)));
   }, [currentWeek]);
 
   const clubsById = useMemo(() => new Map(allClubs.map(c => [c.id, c])), [allClubs]);
@@ -340,8 +353,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     return FORMATIONS[nextMatchLineup.formation] || FORMATIONS['4-3-3'];
   }, [nextMatchLineup]);
 
+  const transferRoiSummary = useMemo(() => {
+    if (!club) return null;
+    return computeTransferROI(club.id, seasonYear, allClubs, freeAgents, transferHistory);
+  }, [club, seasonYear, allClubs, freeAgents, transferHistory]);
+
   // Determine historical record for selected week
-  const isViewingLive = selectedWeek === currentWeek;
+  const isViewingLive = !isSeasonComplete && selectedWeek === currentWeek;
   const historicalRecord = useMemo(() => {
     if (isViewingLive) return undefined;
     return gameweekHistory.find(r => r.week === selectedWeek);
@@ -518,7 +536,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   };
 
   const handleNextWeek = () => {
-    if (selectedWeek < currentWeek) {
+    if (selectedWeek < maxWeek) {
       sounds.playClick();
       setSelectedWeek(selectedWeek + 1);
     }
@@ -526,10 +544,100 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   const handleJumpToCurrent = () => {
     sounds.playClick();
-    setSelectedWeek(currentWeek);
+    setSelectedWeek(maxWeek);
   };
 
-  if (!club) return null;
+  if (!club) {
+    return (
+      <div className="space-y-6">
+        <div className="bg-[#111827] border border-amber-400/30 rounded-2xl p-5 sm:p-8 space-y-6">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+            <div className="flex items-start sm:items-center gap-4 min-w-0">
+              <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl bg-slate-900 border border-amber-400/30 flex items-center justify-center text-amber-400 shrink-0">
+                <Briefcase className="w-7 h-7" />
+              </div>
+              <div className="min-w-0">
+                <span className="text-xs font-bold font-mono uppercase tracking-wider text-amber-400 block mb-1">
+                  Unattached Free Agent · Season {seasonYear}/{seasonYear + 1} · Wk {displayWeek} / 46
+                </span>
+                <h1 className="text-xl sm:text-2xl lg:text-3xl font-extrabold text-white tracking-tight">
+                  {director.name}
+                </h1>
+                <p className="text-xs sm:text-sm text-slate-300 mt-1">
+                  {director.nationality} · Age {director.age} · Philosophy: <strong className="text-amber-300">{director.philosophy}</strong>
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  sounds.playClick();
+                  onNavigate('jobs');
+                }}
+                className="min-h-11 px-5 py-3 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-extrabold text-xs sm:text-sm rounded-xl shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2 transition-all cursor-pointer active:scale-95 whitespace-nowrap"
+              >
+                <Briefcase className="w-4 h-4" />
+                <span>Open Job Market</span>
+                <ArrowUpRight className="w-4 h-4" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  sounds.playWhistle();
+                  onAdvanceWeek();
+                }}
+                disabled={isSimulating}
+                className="min-h-11 px-4 py-3 bg-white/5 hover:bg-white/10 disabled:opacity-50 border border-white/10 text-slate-200 font-bold text-xs sm:text-sm rounded-xl flex items-center justify-center gap-2 transition-all cursor-pointer whitespace-nowrap"
+              >
+                <Calendar className="w-4 h-4 text-amber-400" />
+                <span>
+                  {isSimulating
+                    ? 'Simulating...'
+                    : isSeasonComplete
+                    ? 'End of Season Review'
+                    : `Advance Week (Wk ${displayWeek})`}
+                </span>
+              </button>
+            </div>
+          </div>
+
+          <p className="text-xs sm:text-sm text-slate-400 leading-relaxed max-w-[75ch] border-t border-white/10 pt-4">
+            You are currently without a club post. Review open Sporting Director vacancies in the Job Market or advance the calendar to generate new boardroom opportunities across the English pyramid.
+          </p>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <div className="bg-slate-900/80 border border-white/10 rounded-xl p-3.5">
+              <span className="text-xs text-slate-400 uppercase block mb-1">Global Reputation</span>
+              <span className="text-lg sm:text-xl font-bold font-mono text-amber-400 tabular-nums">
+                {director.reputation} / 100
+              </span>
+            </div>
+            <div className="bg-slate-900/80 border border-white/10 rounded-xl p-3.5">
+              <span className="text-xs text-slate-400 uppercase block mb-1">Silverware Won</span>
+              <span className="text-lg sm:text-xl font-bold font-mono text-blue-400 tabular-nums">
+                {director.trophiesWon.length} Honours
+              </span>
+            </div>
+            <div className="bg-slate-900/80 border border-white/10 rounded-xl p-3.5">
+              <span className="text-xs text-slate-400 uppercase block mb-1">Career Net Spend</span>
+              <span className="text-lg sm:text-xl font-bold font-mono text-emerald-400 tabular-nums">
+                £{(director.netSpend / 1000000).toFixed(1)}M
+              </span>
+            </div>
+            <div className="bg-slate-900/80 border border-white/10 rounded-xl p-3.5">
+              <span className="text-xs text-slate-400 uppercase block mb-1">Years Active</span>
+              <span className="text-lg sm:text-xl font-bold font-mono text-white tabular-nums">
+                {director.yearsInCharge} Seasons
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -590,7 +698,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               className="px-5 py-2.5 min-h-11 lg:min-h-0 bg-amber-400 hover:bg-amber-300 disabled:opacity-50 text-slate-950 text-xs font-extrabold rounded-xl transition-all shadow-lg shadow-amber-400/20 cursor-pointer flex items-center gap-2 whitespace-nowrap"
             >
               <Calendar className="w-4 h-4" />
-              {isSimulating ? 'Simulating Week...' : `Simulate Matchday ${currentWeek}`}
+              {isSimulating
+                ? 'Simulating Week...'
+                : isSeasonComplete
+                ? 'End of Season Review'
+                : `Simulate Matchday ${displayWeek}`}
             </button>
           </div>
 
@@ -763,61 +875,75 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
       </div>
 
-      {/* Financial Ledger & Budget Meters */}
-      <div className="bg-[#111827] border border-white/10 rounded-xl p-4 sm:p-5">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-3 mb-4">
-          <div className="flex items-center gap-2">
-            <DollarSign className="w-4 h-4 text-amber-400" />
-            <h3 className="text-xs font-bold text-white uppercase tracking-wider">
-              Executive Financial Ledger
-            </h3>
+      {/* Financial Ledger & Transfer ROI Row */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
+        <div className="lg:col-span-7 bg-[#111827] border border-white/10 rounded-xl p-4 sm:p-5 flex flex-col justify-between">
+          <div>
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-3 mb-4">
+              <div className="flex items-center gap-2">
+                <DollarSign className="w-4 h-4 text-amber-400" />
+                <h3 className="text-xs font-bold text-white uppercase tracking-wider">
+                  Executive Financial Ledger
+                </h3>
+              </div>
+              <span className="text-xs text-slate-400 font-mono">PSR & Amortisation Safe</span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4 sm:gap-5">
+              <div>
+                <span className="text-xs sm:text-[11px] text-slate-400 uppercase tracking-wider block mb-1">
+                  Transfer War Chest
+                </span>
+                <span className="text-lg lg:text-xl font-bold font-mono tabular-nums text-amber-400">
+                  £{(club.transferBudget / 1000000).toFixed(2)}M
+                </span>
+                <span className="text-xs sm:text-[10px] text-slate-500 block mt-0.5">Available for transfer fees</span>
+              </div>
+
+              <div>
+                <span className="text-xs sm:text-[11px] text-slate-400 uppercase tracking-wider block mb-1">
+                  Weekly Wage Bill
+                </span>
+                <span className="text-lg lg:text-xl font-bold font-mono tabular-nums text-white">
+                  £{(currentWages / 1000).toFixed(0)}k <span className="text-xs text-slate-400 font-normal">/ £{(club.wageBudget / 1000).toFixed(0)}k</span>
+                </span>
+                <span className="text-xs sm:text-[10px] text-slate-400 block mt-0.5 font-mono">
+                  {wageUsagePercent}% of allowed ceiling
+                </span>
+              </div>
+
+              <div>
+                <span className="text-xs sm:text-[11px] text-slate-400 uppercase tracking-wider block mb-1">
+                  Club Treasury Balance
+                </span>
+                <span className="text-lg lg:text-xl font-bold font-mono tabular-nums text-emerald-400">
+                  £{(club.balance / 1000000).toFixed(2)}M
+                </span>
+                <span className="text-xs sm:text-[10px] text-slate-500 block mt-0.5">Total club cash reserves</span>
+              </div>
+
+              <div>
+                <span className="text-xs sm:text-[11px] text-slate-400 uppercase tracking-wider block mb-1">
+                  Director Reputation
+                </span>
+                <span className="text-lg lg:text-xl font-bold font-mono tabular-nums text-blue-400">
+                  {director.reputation} / 100
+                </span>
+                <span className="text-xs sm:text-[10px] text-slate-500 block mt-0.5">Global executive pedigree</span>
+              </div>
+            </div>
           </div>
-          <span className="text-xs text-slate-400 font-mono">PSR & Amortisation Safe</span>
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div>
-            <span className="text-xs sm:text-[11px] text-slate-400 uppercase tracking-wider block mb-1">
-              Transfer War Chest
-            </span>
-            <span className="text-lg lg:text-xl font-bold font-mono tabular-nums text-amber-400">
-              £{(club.transferBudget / 1000000).toFixed(2)}M
-            </span>
-            <span className="text-xs sm:text-[10px] text-slate-500 block mt-0.5">Available for transfer fees</span>
+        {transferRoiSummary && (
+          <div className="lg:col-span-5">
+            <TransferROICard
+              summary={transferRoiSummary}
+              onInspect={() => setIsRoiModalOpen(true)}
+              onOpenTransfers={() => onNavigate('transfers')}
+            />
           </div>
-
-          <div>
-            <span className="text-xs sm:text-[11px] text-slate-400 uppercase tracking-wider block mb-1">
-              Weekly Wage Bill
-            </span>
-            <span className="text-lg lg:text-xl font-bold font-mono tabular-nums text-white">
-              £{(currentWages / 1000).toFixed(0)}k <span className="text-xs text-slate-400 font-normal">/ £{(club.wageBudget / 1000).toFixed(0)}k</span>
-            </span>
-            <span className="text-xs sm:text-[10px] text-slate-400 block mt-0.5 font-mono">
-              {wageUsagePercent}% of allowed ceiling
-            </span>
-          </div>
-
-          <div>
-            <span className="text-xs sm:text-[11px] text-slate-400 uppercase tracking-wider block mb-1">
-              Club Treasury Balance
-            </span>
-            <span className="text-lg lg:text-xl font-bold font-mono tabular-nums text-emerald-400">
-              £{(club.balance / 1000000).toFixed(2)}M
-            </span>
-            <span className="text-xs sm:text-[10px] text-slate-500 block mt-0.5">Total club cash reserves</span>
-          </div>
-
-          <div>
-            <span className="text-xs sm:text-[11px] text-slate-400 uppercase tracking-wider block mb-1">
-              Director Reputation
-            </span>
-            <span className="text-lg lg:text-xl font-bold font-mono tabular-nums text-blue-400">
-              {director.reputation} / 100
-            </span>
-            <span className="text-xs sm:text-[10px] text-slate-500 block mt-0.5">Global executive pedigree</span>
-          </div>
-        </div>
+        )}
       </div>
 
       {/* ========================================================================= */}
@@ -955,22 +1081,22 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 inputMode="numeric"
                 aria-label="Selected Gameweek"
                 min={1}
-                max={Math.max(1, currentWeek)}
+                max={maxWeek}
                 value={selectedWeek}
                 onChange={(e) => {
                   const val = parseInt(e.target.value, 10);
                   if (!isNaN(val)) {
-                    setSelectedWeek(Math.max(1, Math.min(currentWeek, val)));
+                    setSelectedWeek(Math.max(1, Math.min(maxWeek, val)));
                   }
                 }}
                 className="w-16 min-h-11 lg:min-h-0 text-center px-2 py-1 bg-slate-950 border border-white/20 rounded text-amber-400 font-bold text-base md:text-sm tabular-nums focus:outline-none focus:border-amber-400"
               />
-              <span className="text-xs text-slate-500">/ {currentWeek}</span>
+              <span className="text-xs text-slate-500">/ {maxWeek}</span>
             </div>
 
             <button
               onClick={handleNextWeek}
-              disabled={selectedWeek >= currentWeek}
+              disabled={selectedWeek >= maxWeek}
               className="p-2 min-h-11 min-w-11 lg:min-h-0 lg:min-w-0 flex items-center justify-center bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed border border-white/10 rounded-lg text-slate-300 transition-all cursor-pointer active:scale-95"
               title="Next Gameweek"
               aria-label="Next Gameweek"
@@ -986,20 +1112,25 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               type="range"
               aria-label="Scrub Gameweek History"
               min={1}
-              max={Math.max(1, currentWeek)}
+              max={maxWeek}
               value={selectedWeek}
               onChange={(e) => setSelectedWeek(parseInt(e.target.value, 10))}
               className="w-full min-h-11 lg:min-h-0 accent-amber-400 cursor-pointer h-2 bg-slate-800 rounded-lg"
             />
-            <span className="text-xs sm:text-[10px] text-slate-500 font-mono">GW {currentWeek}</span>
+            <span className="text-xs sm:text-[10px] text-slate-500 font-mono">GW {maxWeek}</span>
           </div>
 
           {/* Right: Live vs Historical Status & Jump to Current */}
           <div className="flex items-center gap-2 w-full md:w-auto justify-end">
-            {isViewingLive ? (
+            {isSeasonComplete && selectedWeek === 46 ? (
               <span className="text-xs sm:text-[11px] font-mono text-emerald-400 flex items-center gap-1.5 px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded-md">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                Live Standings (GW {currentWeek})
+                Season Complete (46/46)
+              </span>
+            ) : isViewingLive ? (
+              <span className="text-xs sm:text-[11px] font-mono text-emerald-400 flex items-center gap-1.5 px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded-md">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                Live Standings (GW {displayWeek})
               </span>
             ) : (
               <button
@@ -1007,7 +1138,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 className="text-xs sm:text-[11px] font-mono text-amber-400 hover:text-amber-300 flex items-center gap-1.5 px-3 py-1.5 min-h-11 lg:min-h-0 bg-amber-400/10 hover:bg-amber-400/20 border border-amber-400/30 rounded-md transition-all cursor-pointer whitespace-nowrap active:scale-95"
               >
                 <RefreshCw className="w-3 h-3" />
-                Jump to Current (GW {currentWeek})
+                {isSeasonComplete ? 'Jump to Final (GW 46)' : `Jump to Current (GW ${displayWeek})`}
               </button>
             )}
           </div>
@@ -1025,7 +1156,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <h4 className="text-xs font-bold text-white uppercase tracking-wider flex flex-wrap items-center gap-2">
                   <span>{selectedTier === 1 ? 'Premier League' : selectedTier === 2 ? 'Championship' : 'League One'}</span>
                   <span className="text-xs sm:text-[10px] font-normal text-slate-400 font-mono">
-                    {isViewingLive ? `(Live GW ${currentWeek})` : `(Snapshot after GW ${selectedWeek})`}
+                    {isSeasonComplete && selectedWeek === 46
+                      ? '(Final Standings · GW 46)'
+                      : isViewingLive
+                      ? `(Live GW ${displayWeek})`
+                      : `(Snapshot after GW ${selectedWeek})`}
                   </span>
                 </h4>
                 <span className="text-xs sm:text-[10px] text-slate-400">
@@ -1228,10 +1363,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <div className="py-8 px-4 text-center text-slate-400 space-y-2">
                   <Flame className="w-6 h-6 text-amber-400 mx-auto opacity-70" />
                   <p className="text-xs font-semibold text-slate-200">
-                    Gameweek {currentWeek} Kick-off Pending
+                    {selectedTier === 1 && currentWeek > 38
+                      ? 'Premier League Regular Season Complete (38/38 Matches)'
+                      : `Gameweek ${displayWeek} Kick-off Pending`}
                   </p>
                   <p className="text-xs sm:text-[11px] text-slate-500 max-w-xs mx-auto">
-                    These fixtures have not kicked off yet. Advance the weekly simulation to play out all 34 matches across the pyramid!
+                    {selectedTier === 1 && currentWeek > 38
+                      ? 'Premier League fixtures have concluded for this campaign. Advance the simulation to finish Championship and League One matchdays (Weeks 39–46).'
+                      : 'These fixtures have not kicked off yet. Advance the weekly simulation to play out all scheduled matches across the pyramid!'}
                   </p>
                   <button
                     onClick={() => {
@@ -1241,7 +1380,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     disabled={isSimulating}
                     className="mt-3 px-4 py-2 min-h-11 lg:min-h-0 bg-amber-400 hover:bg-amber-300 disabled:opacity-50 text-slate-950 text-xs font-bold rounded-lg cursor-pointer"
                   >
-                    Simulate Matchday {currentWeek}
+                    Simulate Matchday {displayWeek}
                   </button>
                 </div>
               ) : gameweekFixtures.length === 0 ? (
@@ -1366,6 +1505,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <span>Squad Morale: <strong className="text-emerald-400 font-semibold">High</strong></span>
         </div>
       </div>
+
+      {transferRoiSummary && (
+        <TransferROIModal
+          isOpen={isRoiModalOpen}
+          onClose={() => setIsRoiModalOpen(false)}
+          summary={transferRoiSummary}
+          clubName={club.name}
+        />
+      )}
 
     </div>
   );

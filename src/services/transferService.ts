@@ -38,7 +38,15 @@ export const MAX_MANAGER_SALES_PER_SEASON = 5;
 
 export function capTransferHistory(records: TransferRecord[]): TransferRecord[] {
   if (records.length <= MAX_TRANSFER_HISTORY_RECORDS) return records;
-  return records.slice(0, MAX_TRANSFER_HISTORY_RECORDS);
+  let aiCount = 0;
+  return records.filter(tr => {
+    if (tr.initiatedBy !== 'ai') return true;
+    if (aiCount < MAX_TRANSFER_HISTORY_RECORDS) {
+      aiCount++;
+      return true;
+    }
+    return false;
+  });
 }
 
 // Parse formation strings like "4-3-3 Holding", "4-2-3-1 Wide", "3-5-2 Direct" into outfield counts
@@ -83,7 +91,6 @@ export function selectStartingXI(
     const player = healthyById.get(pid);
     if (!player) continue;
 
-    player.effectiveOverall = getSlotFit(player, def.slots[i].role).effectiveOverall;
     selected.push(player);
     seen.add(player.id);
   }
@@ -115,6 +122,21 @@ export function evaluateSigning({
   fee,
   wage,
 }: EvaluateSigningParams): EvaluateSigningResult {
+  if (!Number.isFinite(fee) || fee < 0) {
+    return {
+      ok: false,
+      failStage: 'budget',
+      reason: 'BID FAILED: Enter a valid transfer fee.',
+    };
+  }
+  if (!Number.isFinite(wage) || wage <= 0) {
+    return {
+      ok: false,
+      failStage: 'player_terms',
+      reason: 'TERMS FAILED: Enter a valid weekly wage offer.',
+    };
+  }
+
   // 1. 25-man squad cap
   if (buyingClub.squad.length >= 25) {
     return {
@@ -124,12 +146,19 @@ export function evaluateSigning({
     };
   }
 
-  // 2. Transfer budget check
+  // 2. Transfer budget & treasury cash check
   if (fee > buyingClub.transferBudget) {
     return {
       ok: false,
       failStage: 'budget',
       reason: `BID FAILED: You only have £${(buyingClub.transferBudget / 1000000).toFixed(1)}M in your transfer war chest.`,
+    };
+  }
+  if (fee > 0 && fee > buyingClub.balance) {
+    return {
+      ok: false,
+      failStage: 'budget',
+      reason: `BID FAILED: Club cash reserves (£${(buyingClub.balance / 1000000).toFixed(1)}M) are insufficient to cover the £${(fee / 1000000).toFixed(1)}M fee.`,
     };
   }
 
@@ -140,7 +169,7 @@ export function evaluateSigning({
       return {
         ok: false,
         failStage: 'selling_club',
-        reason: `BID REJECTED: ${sellingClub.name} deemed £${(fee / 1000000).toFixed(1)}M derisory. They require at least £${(player.value / 1000000).toFixed(1)}M.`,
+        reason: `BID REJECTED: ${sellingClub.name} deemed £${(fee / 1000000).toFixed(1)}M derisory. They require at least £${(minAcceptable / 1000000).toFixed(1)}M.`,
       };
     }
   }
@@ -877,14 +906,22 @@ export function runManagerTransferActivity({
   const effectiveSignings = seasonSigningsCount + pendingSigningsCount;
   const effectiveSales = seasonSalesCount + pendingSalesCount;
 
-  // Active during open transfer windows (higher probability early in the window before targets are met)
-  const actionChance = seasonSigningsCount < 2 || seasonSalesCount < 1 ? 0.85 : 0.60;
+  const myClubWages = myClub.squad.reduce((sum, p) => sum + p.wage, 0);
+  const myClubWageSpace = myClub.wageBudget - myClubWages;
+
+  // Deterministic when first window signing is still needed or negative wage headroom requires immediate sale, high otherwise
+  const actionChance =
+    (signingsDelegated && effectiveSignings === 0) || (salesDelegated && myClubWageSpace <= 0)
+      ? 1.0
+      : effectiveSignings < 2 || effectiveSales < 1
+        ? 0.90
+        : 0.65;
   if (Math.random() >= actionChance) return noOp;
 
   const attemptSale = (targetClubId: string): RunManagerTransferActivityResult | null => {
     const club = clubs.find(c => c.id === targetClubId);
     if (!club) return null;
-    if (!salesDelegated || seasonSalesCount >= MAX_MANAGER_SALES_PER_SEASON) return null;
+    if (!salesDelegated || effectiveSales >= MAX_MANAGER_SALES_PER_SEASON) return null;
     if (delegation.transferSales === 'shared' && pendingProposals.length >= MAX_PENDING_PROPOSALS) return null;
 
     const startingXI = selectStartingXI(club, manager);
@@ -916,8 +953,28 @@ export function runManagerTransferActivity({
 
     if (saleCandidates.length === 0) return null;
 
-    // Sort candidates: unhappy or cooling veterans first, then lowest OVR
-    saleCandidates.sort((a, b) => a.overall - b.overall);
+    const clubWageSpace = club.wageBudget - club.squad.reduce((sum, p) => sum + p.wage, 0);
+
+    // Sort candidates: unhappy non-starters -> cooling veterans -> protect U21 high-momentum prospects -> free real wage space when tight -> lowest OVR
+    saleCandidates.sort((a, b) => {
+      const aUnhappy = a.happiness < 40 ? 1 : 0;
+      const bUnhappy = b.happiness < 40 ? 1 : 0;
+      if (aUnhappy !== bUnhappy) return bUnhappy - aUnhappy;
+
+      const aCoolingVet = a.age >= 30 && a.growthMomentum === 'cooling' ? 1 : 0;
+      const bCoolingVet = b.age >= 30 && b.growthMomentum === 'cooling' ? 1 : 0;
+      if (aCoolingVet !== bCoolingVet) return bCoolingVet - aCoolingVet;
+
+      const aProspect = a.age <= 20 && (a.growthMomentum === 'breakout' || a.growthMomentum === 'rapid') ? 1 : 0;
+      const bProspect = b.age <= 20 && (b.growthMomentum === 'breakout' || b.growthMomentum === 'rapid') ? 1 : 0;
+      if (aProspect !== bProspect) return aProspect - bProspect;
+
+      if (clubWageSpace <= 25000 && a.wage !== b.wage) {
+        return b.wage - a.wage;
+      }
+
+      return a.overall - b.overall;
+    });
 
     for (const candidate of saleCandidates) {
       const offers = getTransferOffers(candidate, clubs, targetClubId);
@@ -1018,17 +1075,41 @@ export function runManagerTransferActivity({
   const attemptSigning = (targetClubId: string): RunManagerTransferActivityResult | null => {
     const club = clubs.find(c => c.id === targetClubId);
     if (!club) return null;
-    if (!signingsDelegated || seasonSigningsCount >= MAX_MANAGER_SIGNINGS_PER_SEASON) return null;
+    if (!signingsDelegated || effectiveSignings >= MAX_MANAGER_SIGNINGS_PER_SEASON) return null;
     if (delegation.transferSignings === 'shared' && pendingProposals.length >= MAX_PENDING_PROPOSALS) return null;
 
-    // If squad is full (25), look for a sale instead
+    // If squad is full (25), look for a sale instead or explain why signings are blocked
     if (club.squad.length >= 25) {
-      return attemptSale(targetClubId);
+      const saleOutcome = attemptSale(targetClubId);
+      if (saleOutcome) return saleOutcome;
+      return {
+        ...noOp,
+        pressHeadlines: [
+          {
+            title: `Head Coach ${manager.name} wants to strengthen, but the 25-man squad is full`,
+            source: 'The Transfer Wire',
+            category: 'transfer',
+            sentiment: 'neutral',
+          },
+        ],
+      };
     }
 
     const currentWages = club.squad.reduce((sum, p) => sum + p.wage, 0);
     const wageSpace = club.wageBudget - currentWages;
-    if (wageSpace <= 0) return null;
+    if (wageSpace < 1000) {
+      return {
+        ...noOp,
+        pressHeadlines: [
+          {
+            title: `Head Coach ${manager.name} is blocked from new signings until weekly wage space is cleared`,
+            source: 'The Transfer Wire',
+            category: 'transfer',
+            sentiment: 'neutral',
+          },
+        ],
+      };
+    }
 
     const startingXI = selectStartingXI(club, manager);
     const positions: PlayerPosition[] = ['GK', 'DEF', 'MID', 'FWD'];
@@ -1046,6 +1127,7 @@ export function runManagerTransferActivity({
 
     const maxAllowedFee =
       owner.wealth === 'frugal' ? club.transferBudget * 0.55 : club.transferBudget * 0.70;
+    const effectiveMaxFee = Math.min(maxAllowedFee, club.balance);
     const candidates: Array<{
       player: Player;
       sellingClub: Club | null;
@@ -1053,6 +1135,7 @@ export function runManagerTransferActivity({
       priorityDepth: boolean;
       upgradeMargin: number;
     }> = [];
+    let skippedVetoedTargetName: string | null = null;
 
     const considerCandidate = (p: Player, sellingClub: Club | null) => {
       if (p.isInjured) return;
@@ -1061,14 +1144,19 @@ export function runManagerTransferActivity({
 
       const need = posNeeds.get(p.position)!;
       const isUpgrade = need.weakestStarterOvr === 0 || p.overall >= need.weakestStarterOvr;
-      const isDepthAddition = club.squad.length < 22 && p.overall >= need.weakestStarterOvr - 3;
+      const isDepthAddition = club.squad.length < 24 && p.overall >= Math.max(45, need.weakestStarterOvr - 4);
       if (!need.belowMin && !isUpgrade && !isDepthAddition) return;
 
-      const estFee = sellingClub ? p.value : 0;
-      if (estFee > maxAllowedFee) return;
+      const minAcceptableFee = sellingClub ? Math.round(p.value * 0.9) : 0;
+      if (minAcceptableFee > effectiveMaxFee) return;
 
-      const estWage = Math.max(p.wage, Math.round(p.wage * 1.1));
-      if (estWage > wageSpace) return;
+      const minValidWage = Math.max(1000, Math.ceil(p.wage * 0.85));
+      if (minValidWage > wageSpace) return;
+
+      if (owner.recruitmentPhilosophy === 'youth_development' && p.age >= 30 && owner.involvement === 'micromanager') {
+        if (!skippedVetoedTargetName) skippedVetoedTargetName = p.name;
+        return;
+      }
 
       const score = p.overall + getStyleBonus(manager, p) + getOwnerPhilosophyBonus(owner, p);
       candidates.push({
@@ -1092,7 +1180,22 @@ export function runManagerTransferActivity({
       }
     }
 
-    if (candidates.length === 0) return null;
+    if (candidates.length === 0) {
+      if (skippedVetoedTargetName) {
+        return {
+          ...noOp,
+          pressHeadlines: [
+            {
+              title: `Board blocks Head Coach's move for ${skippedVetoedTargetName}`,
+              source: 'The Boardroom Wire',
+              category: 'transfer',
+              sentiment: 'negative',
+            },
+          ],
+        };
+      }
+      return null;
+    }
 
     // Sort: positions below minimum depth first, then highest score
     candidates.sort((a, b) => {
@@ -1101,17 +1204,23 @@ export function runManagerTransferActivity({
     });
 
     const pressHeadlines: PressHeadline[] = [];
-    const tries = Math.min(12, candidates.length);
+    const tries = Math.min(40, candidates.length);
     let loggedVeto = false;
 
     for (let i = 0; i < tries; i++) {
       const candidate = candidates[i];
+      const minAcceptableFee = candidate.sellingClub ? Math.round(candidate.player.value * 0.9) : 0;
       const rawFee = candidate.sellingClub
-        ? Math.round(candidate.player.value * (0.95 + Math.random() * 0.15))
+        ? Math.round(candidate.player.value * (0.95 + Math.random() * 0.12))
         : 0;
-      // Keep bid within budget cap while meeting selling club minimum (0.9x)
-      const bidFee = candidate.sellingClub ? Math.min(rawFee, Math.floor(maxAllowedFee)) : 0;
-      const bidWage = Math.max(candidate.player.wage, Math.round(candidate.player.wage * 1.1));
+      // Keep bid within budget/balance cap while meeting selling club minimum (0.9x)
+      const bidFee = candidate.sellingClub
+        ? Math.max(minAcceptableFee, Math.min(rawFee, Math.floor(effectiveMaxFee)))
+        : 0;
+
+      const minValidWage = Math.max(1000, Math.ceil(candidate.player.wage * 0.85));
+      const desiredWage = Math.max(1000, candidate.player.wage, Math.round(candidate.player.wage * 1.1));
+      const bidWage = Math.max(minValidWage, Math.min(desiredWage, wageSpace));
 
       const evalResult = evaluateSigning({
         player: candidate.player,
@@ -1249,6 +1358,7 @@ export function runManagerTransferActivity({
   if (signingsDelegated && salesDelegated) {
     const preferSaleFirst =
       myClub.squad.length >= 25 ||
+      myClubWageSpace <= 0 ||
       (effectiveSignings >= 2 && effectiveSales === 0) ||
       (effectiveSignings > effectiveSales + 1 && Math.random() < 0.70);
 
@@ -1277,4 +1387,212 @@ export function runManagerTransferActivity({
   }
 
   return noOp;
+}
+
+export interface RunManagerContractRenewalsParams {
+  myClubId: string | null;
+  club: Club;
+  manager?: Manager;
+  currentWeek: number;
+  seasonYear: number;
+  delegation: DelegationMatrix;
+  transferHistory: TransferRecord[];
+  isSeasonEndPass?: boolean;
+}
+
+export interface RunManagerContractRenewalsResult {
+  updatedClub: Club;
+  newTransfers: TransferRecord[];
+  pressHeadlines: PressHeadline[];
+}
+
+export function runManagerContractRenewals({
+  myClubId,
+  club,
+  manager,
+  currentWeek,
+  seasonYear,
+  delegation,
+  transferHistory,
+  isSeasonEndPass = false,
+}: RunManagerContractRenewalsParams): RunManagerContractRenewalsResult {
+  const noOp: RunManagerContractRenewalsResult = {
+    updatedClub: club,
+    newTransfers: [],
+    pressHeadlines: [],
+  };
+
+  if (!myClubId || club.id !== myClubId) return noOp;
+  if (delegation.contractRenewals !== 'manager') return noOp;
+  if (!manager || club.managerId !== manager.id) return noOp;
+
+  const isDeterministicTick =
+    isSeasonEndPass || currentWeek === 1 || currentWeek === 20 || currentWeek >= 36;
+  if (!isDeterministicTick && Math.random() >= 0.45) {
+    return noOp;
+  }
+
+  const renewedThisSeason = new Set(
+    transferHistory
+      .filter(
+        tr =>
+          tr.season === seasonYear &&
+          tr.type === 'renewal' &&
+          tr.toClubId === club.id
+      )
+      .map(tr => tr.playerId)
+  );
+
+  const maxContractYears = isSeasonEndPass ? 0 : 1;
+  const expiringPlayers = club.squad.filter(
+    p =>
+      !p.retiringAtSeasonEnd &&
+      p.contractYears <= maxContractYears &&
+      !renewedThisSeason.has(p.id)
+  );
+
+  if (expiringPlayers.length === 0) return noOp;
+
+  const startingXI = selectStartingXI(club, manager);
+  const starterIds = new Set(startingXI.map(p => p.id));
+  const top14Ids = new Set(
+    [...club.squad]
+      .sort((a, b) => b.overall - a.overall)
+      .slice(0, 14)
+      .map(p => p.id)
+  );
+  const avgStarterOvr =
+    startingXI.length > 0
+      ? startingXI.reduce((sum, p) => sum + p.overall, 0) / startingXI.length
+      : 70;
+
+  const posCounts: Record<PlayerPosition, number> = {
+    GK: club.squad.filter(p => p.position === 'GK').length,
+    DEF: club.squad.filter(p => p.position === 'DEF').length,
+    MID: club.squad.filter(p => p.position === 'MID').length,
+    FWD: club.squad.filter(p => p.position === 'FWD').length,
+  };
+
+  const candidates = expiringPlayers.filter(p => {
+    const isStarter = starterIds.has(p.id);
+    if (p.happiness < 35 && !isStarter) return false;
+    if (
+      p.age >= 34 &&
+      p.growthMomentum === 'cooling' &&
+      p.overall < avgStarterOvr - 4 &&
+      !isStarter
+    ) {
+      return false;
+    }
+
+    const isCore = isStarter || top14Ids.has(p.id);
+    const isHighPotentialYouth =
+      p.age <= 24 && (p.growthMomentum === 'breakout' || p.growthMomentum === 'rapid');
+    const isInFormContributor = p.form >= 7.0 || p.overall >= avgStarterOvr - 3;
+    const isNeededDepth =
+      posCounts[p.position] <= MIN_POSITION_DEPTH[p.position] || club.squad.length <= 21;
+
+    return isCore || isHighPotentialYouth || isInFormContributor || isNeededDepth;
+  });
+
+  if (candidates.length === 0) return noOp;
+
+  candidates.sort((a, b) => {
+    const aStarter = starterIds.has(a.id) ? 1 : 0;
+    const bStarter = starterIds.has(b.id) ? 1 : 0;
+    if (aStarter !== bStarter) return bStarter - aStarter;
+    if (b.overall !== a.overall) return b.overall - a.overall;
+    return a.age - b.age;
+  });
+
+  const maxPerTick = isSeasonEndPass ? 12 : currentWeek >= 40 ? 4 : 2;
+  const chosen = candidates.slice(0, maxPerTick);
+
+  let workingSquad = club.squad.map(p => ({ ...p }));
+  const newTransfers: TransferRecord[] = [];
+  const pressHeadlines: PressHeadline[] = [];
+
+  for (const target of chosen) {
+    const idx = workingSquad.findIndex(p => p.id === target.id);
+    if (idx === -1) continue;
+    const player = workingSquad[idx];
+
+    const currentWages = workingSquad.reduce((sum, pl) => sum + pl.wage, 0);
+    const wageHeadroom = Math.max(0, club.wageBudget - currentWages);
+
+    const isStarter = starterIds.has(player.id);
+    const isTop14 = top14Ids.has(player.id);
+    const raiseFactor =
+      player.form >= 7.3 || player.overall >= avgStarterOvr + 2
+        ? 1.15
+        : isStarter || isTop14
+          ? 1.10
+          : 1.05;
+
+    const desiredWage = Math.max(1000, Math.round(player.wage * raiseFactor));
+    const agreedWage =
+      wageHeadroom > 0
+        ? Math.min(desiredWage, player.wage + wageHeadroom)
+        : player.wage;
+
+    const newContractYears =
+      player.age >= 32
+        ? isStarter || player.overall >= avgStarterOvr
+          ? 2
+          : 1
+        : isStarter || player.overall >= avgStarterOvr + 1 || player.age <= 24
+          ? 4
+          : 3;
+
+    const renewedPlayer: Player = {
+      ...player,
+      wage: agreedWage,
+      contractYears: newContractYears,
+      happiness: Math.min(100, player.happiness + 12),
+      morale: 'ecstatic',
+    };
+    workingSquad[idx] = renewedPlayer;
+
+    const record: TransferRecord = {
+      id: `tr_${seasonYear}_w${currentWeek}_ren_${renewedPlayer.id}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      season: seasonYear,
+      week: currentWeek,
+      type: 'renewal',
+      playerId: renewedPlayer.id,
+      playerName: renewedPlayer.name,
+      position: renewedPlayer.position,
+      age: renewedPlayer.age,
+      overall: renewedPlayer.overall,
+      fromClubId: club.id,
+      toClubId: club.id,
+      fee: 0,
+      wage: agreedWage,
+      contractYears: newContractYears,
+      initiatedBy: 'manager',
+      note: isSeasonEndPass
+        ? `End-of-season renewal approved by Head Coach ${manager.name}`
+        : `Contract extended by Head Coach ${manager.name}`,
+    };
+    newTransfers.push(record);
+
+    if (pressHeadlines.length < 2) {
+      pressHeadlines.push({
+        title: `Head Coach ${manager.name} agreed a new ${newContractYears}-year contract with ${renewedPlayer.name} (£${(agreedWage / 1000).toFixed(0)}k/wk)`,
+        source: 'Club Contract Wire',
+        category: 'transfer',
+        sentiment: 'positive',
+      });
+    }
+  }
+
+  const updatedClub: Club = {
+    ...club,
+    squad: workingSquad,
+  };
+
+  return {
+    updatedClub,
+    newTransfers,
+    pressHeadlines,
+  };
 }

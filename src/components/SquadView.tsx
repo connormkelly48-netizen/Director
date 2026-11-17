@@ -499,7 +499,7 @@ export const SquadView: React.FC<SquadViewProps> = ({
 
     const wageDiff = renewWage - selectedPlayer.wage;
 
-    if (currentWages + wageDiff > club.wageBudget) {
+    if (wageDiff > 0 && currentWages + wageDiff > club.wageBudget) {
       setFeedback(`EXTENSION BLOCKED: New wage exceeds club weekly wage budget!`);
       return;
     }

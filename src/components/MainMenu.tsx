@@ -67,7 +67,8 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   onImportSave,
   onResetDatabase,
 }) => {
-  const [activeModal, setActiveModal] = useState<'none' | 'database' | 'handbook' | 'settings' | 'confirm_new'>('none');
+  const [activeModal, setActiveModal] = useState<'none' | 'database' | 'handbook' | 'settings' | 'confirm_new' | 'confirm_reset'>('none');
+  const displayWeek = Math.min(46, currentWeek);
   const [selectedDbTier, setSelectedDbTier] = useState<LeagueTier>(1);
   const [dbSearch, setDbSearch] = useState('');
   const [selectedDbClub, setSelectedDbClub] = useState<Club | null>(null);
@@ -238,37 +239,39 @@ export const MainMenu: React.FC<MainMenuProps> = ({
         <div className="w-full lg:w-5/12 sm:max-w-md space-y-4">
           
           {/* Active Career Snapshot Card (if save/director exists) */}
-          {director && club ? (
+          {director ? (
             <div className="bg-gradient-to-b from-[#141d2e] to-[#0d1422] border-2 border-amber-400/40 rounded-2xl p-4 sm:p-6 shadow-2xl shadow-amber-500/10 relative overflow-hidden group">
               <div 
                 className="hidden md:block absolute top-0 right-0 w-32 h-32 rounded-full blur-2xl opacity-20 pointer-events-none"
-                style={{ backgroundColor: club.primaryColor || '#f59e0b' }}
+                style={{ backgroundColor: club?.primaryColor || '#f59e0b' }}
               />
 
               <div className="flex flex-wrap items-start justify-between gap-3 mb-4 relative z-10">
                 <div className="flex items-center gap-3 min-w-0">
                   <div 
                     className="w-11 h-11 sm:w-12 sm:h-12 rounded-xl flex items-center justify-center font-bold text-white shadow-inner text-base border border-white/20 shrink-0"
-                    style={{ backgroundColor: club.primaryColor || '#1e293b' }}
+                    style={{ backgroundColor: club?.primaryColor || '#1e293b' }}
                   >
-                    {club.shortName}
+                    {club?.shortName || 'FA'}
                   </div>
                   <div className="min-w-0">
                     <span className="text-xs sm:text-[10px] font-bold font-mono tracking-wider uppercase text-amber-400 block">
-                      Active Directorship
+                      {club ? 'Active Directorship' : 'Unattached Free Agent'}
                     </span>
                     <h3 className="text-lg sm:text-xl font-black text-white leading-tight truncate">
-                      {club.name}
+                      {club ? club.name : 'Between Appointments'}
                     </h3>
                     <div className="text-xs text-slate-300">
-                      {club.tier === 1 ? 'Premier League' : club.tier === 2 ? 'Championship' : 'League One'}
+                      {club
+                        ? club.tier === 1 ? 'Premier League' : club.tier === 2 ? 'Championship' : 'League One'
+                        : 'Seeking Sporting Director Post'}
                     </div>
                   </div>
                 </div>
 
                 <div className="text-left sm:text-right font-mono shrink-0">
                   <span className="text-xs text-slate-400 block">Campaign</span>
-                  <span className="text-sm font-bold text-white">Wk {currentWeek} / 46</span>
+                  <span className="text-sm font-bold text-white">Wk {displayWeek} / 46</span>
                   <span className="text-xs sm:text-[10px] text-amber-400 block">{seasonYear}/{seasonYear + 1}</span>
                 </div>
               </div>
@@ -283,24 +286,39 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                   <span className="text-slate-400">Philosophy:</span>
                   <span className="text-amber-300">{director.philosophy}</span>
                 </div>
-                <div className="flex justify-between items-center pt-1 border-t border-white/5">
-                  <span className="text-slate-400">Board Trust:</span>
-                  <div className="flex items-center gap-2">
-                    <div className="w-20 bg-slate-800 h-2 rounded-full overflow-hidden">
-                      <div 
-                        className={`h-full rounded-full ${
-                          director.boardTrust > 60 ? 'bg-emerald-400' : director.boardTrust > 35 ? 'bg-amber-400' : 'bg-rose-500'
-                        }`}
-                        style={{ width: `${director.boardTrust}%` }}
-                      />
+                {club ? (
+                  <>
+                    <div className="flex justify-between items-center pt-1 border-t border-white/5">
+                      <span className="text-slate-400">Board Trust:</span>
+                      <div className="flex items-center gap-2">
+                        <div className="w-20 bg-slate-800 h-2 rounded-full overflow-hidden">
+                          <div 
+                            className={`h-full rounded-full ${
+                              director.boardTrust > 60 ? 'bg-emerald-400' : director.boardTrust > 35 ? 'bg-amber-400' : 'bg-rose-500'
+                            }`}
+                            style={{ width: `${director.boardTrust}%` }}
+                          />
+                        </div>
+                        <span className="font-bold text-white">{director.boardTrust}%</span>
+                      </div>
                     </div>
-                    <span className="font-bold text-white">{director.boardTrust}%</span>
-                  </div>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-400">War Chest:</span>
-                  <span className="text-emerald-400 font-bold">£{(club.transferBudget / 1000000).toFixed(1)}m</span>
-                </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">War Chest:</span>
+                      <span className="text-emerald-400 font-bold">£{(club.transferBudget / 1000000).toFixed(1)}m</span>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="flex justify-between items-center pt-1 border-t border-white/5">
+                      <span className="text-slate-400">Reputation:</span>
+                      <span className="font-bold text-amber-400">{director.reputation} / 100</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">Silverware Won:</span>
+                      <span className="text-emerald-400 font-bold">{director.trophiesWon.length} Honours</span>
+                    </div>
+                  </>
+                )}
               </div>
 
               {/* Continue Button */}
@@ -457,7 +475,17 @@ export const MainMenu: React.FC<MainMenuProps> = ({
           <div className="text-center">
             <h3 className="text-xl font-bold text-white">Start New Career?</h3>
             <p className="text-xs text-slate-300 mt-2 leading-relaxed">
-              You have an ongoing career in progress as Sporting Director at <strong className="text-white">{club?.name || 'your club'}</strong> (Week {currentWeek}).
+              You have an ongoing career in progress as Sporting Director{' '}
+              {club ? (
+                <>
+                  at <strong className="text-white">{club.name}</strong>
+                </>
+              ) : (
+                <>
+                  as an <strong className="text-white">unattached free agent</strong>
+                </>
+              )}{' '}
+              (Week {displayWeek}).
               Starting a new career will replace your current save.
             </p>
           </div>
@@ -786,17 +814,62 @@ export const MainMenu: React.FC<MainMenuProps> = ({
             <button
               type="button"
               onClick={() => {
-                if (confirm('Are you sure you want to reset all data and clear current career?')) {
-                  sounds.playCrisis();
-                  onResetDatabase();
-                  setActiveModal('none');
-                }
+                sounds.playClick();
+                setActiveModal('confirm_reset');
               }}
               className="min-h-11 lg:min-h-0 px-3 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-300 text-xs font-bold rounded-lg cursor-pointer flex items-center justify-center gap-1 shrink-0"
             >
               <RotateCcw className="w-3.5 h-3.5" />
               <span>Reset</span>
             </button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* MODAL 5: Confirm Database Reset */}
+      <Modal
+        isOpen={activeModal === 'confirm_reset'}
+        onClose={() => setActiveModal('settings')}
+        maxWidthClass="max-w-md"
+        borderClass="border-rose-500/30"
+        backdropClass="bg-[#070a0f]/90"
+        ariaLabel="Reset Factory Database confirmation"
+        footer={
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            <button
+              type="button"
+              onClick={() => {
+                sounds.playClick();
+                setActiveModal('settings');
+              }}
+              className="min-h-11 lg:min-h-0 px-4 py-2 bg-white/5 hover:bg-white/10 text-xs font-semibold text-slate-300 rounded-lg cursor-pointer"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                sounds.playCrisis();
+                onResetDatabase();
+                setActiveModal('none');
+              }}
+              className="min-h-11 lg:min-h-0 px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs rounded-lg shadow-md cursor-pointer flex items-center gap-1.5"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Reset Database</span>
+            </button>
+          </div>
+        }
+      >
+        <div className="space-y-4">
+          <div className="w-12 h-12 bg-rose-500/10 border border-rose-500/30 rounded-xl flex items-center justify-center mx-auto text-rose-400">
+            <AlertTriangle className="w-6 h-6" />
+          </div>
+          <div className="text-center">
+            <h3 className="text-xl font-bold text-white">Reset Factory Database?</h3>
+            <p className="text-xs text-slate-300 mt-2 leading-relaxed">
+              This will permanently erase your local career save and restore all 68 English pyramid clubs, squads, and managers to their starting state.
+            </p>
           </div>
         </div>
       </Modal>

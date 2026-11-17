@@ -30,6 +30,24 @@ import { CURRENT_SAVE_VERSION, SAVE_STORAGE_KEY, validateSaveJson } from './util
 
 const STORAGE_KEY = SAVE_STORAGE_KEY;
 
+const DEFAULT_DELEGATION: DelegationMatrix = {
+  transferSignings: 'director',
+  transferSales: 'director',
+  contractRenewals: 'director',
+  youthPromotion: 'director',
+  tacticalStyle: 'manager_freedom',
+};
+
+function normalizeDelegation(raw?: Partial<DelegationMatrix>): DelegationMatrix {
+  return {
+    transferSignings: raw?.transferSignings ?? DEFAULT_DELEGATION.transferSignings,
+    transferSales: raw?.transferSales ?? DEFAULT_DELEGATION.transferSales,
+    contractRenewals: raw?.contractRenewals ?? DEFAULT_DELEGATION.contractRenewals,
+    youthPromotion: raw?.youthPromotion ?? DEFAULT_DELEGATION.youthPromotion,
+    tacticalStyle: raw?.tacticalStyle ?? DEFAULT_DELEGATION.tacticalStyle,
+  };
+}
+
 // Migrate individual player records from older saves or missing fields
 function migratePlayerData(p: Partial<Player>): Player {
   return {
@@ -54,6 +72,7 @@ function migratePlayerData(p: Partial<Player>): Player {
     clubId: p.clubId !== undefined ? p.clubId : null,
     isInjured: Boolean(p.isInjured),
     injuryWeeks: typeof p.injuryWeeks === 'number' ? p.injuryWeeks : 0,
+    ...(p.retiringAtSeasonEnd ? { retiringAtSeasonEnd: true } : {}),
   };
 }
 
@@ -144,13 +163,7 @@ export default function App() {
   const [seasonSummary, setSeasonSummary] = useState<SeasonSummary | null>(null);
   const [storageWarning, setStorageWarning] = useState<string | null>(null);
 
-  const [delegation, setDelegation] = useState<DelegationMatrix>({
-    transferSignings: 'director',
-    transferSales: 'director',
-    contractRenewals: 'director',
-    youthPromotion: 'director',
-    tacticalStyle: 'manager_freedom',
-  });
+  const [delegation, setDelegation] = useState<DelegationMatrix>(DEFAULT_DELEGATION);
 
   const debounceTimerRef = useRef<number | null>(null);
   const wasSimulatingRef = useRef(false);
@@ -210,13 +223,7 @@ export default function App() {
         setTransferHistory(migratedHistory);
         setTransferProposals(Array.isArray(data.transferProposals) ? data.transferProposals : []);
         setIncomingBids(Array.isArray(data.incomingBids) ? data.incomingBids : []);
-        setDelegation(data.delegation || {
-          transferSignings: 'director',
-          transferSales: 'director',
-          contractRenewals: 'director',
-          youthPromotion: 'director',
-          tacticalStyle: 'manager_freedom',
-        });
+        setDelegation(normalizeDelegation(data.delegation));
       } else {
         const { clubs: initClubs, owners: initOwners, managers: initManagers, freeAgents: initFA } = loadDatabase();
         setClubs(initClubs);
@@ -404,10 +411,17 @@ export default function App() {
     setOwners(initOwners);
     setManagers(initManagers);
     setFreeAgents(initFA);
+    setDelegation(DEFAULT_DELEGATION);
     setGameweekHistory([]);
     setTransferHistory([]);
     setTransferProposals([]);
     setIncomingBids([]);
+    setIsSacked(false);
+    setWeeklyDigest(null);
+    setSeasonSummary(null);
+    setNewsAlert(null);
+    setStorageWarning(null);
+    setCurrentTab('dashboard');
     setCurrentWeek(1);
     setSeasonYear(2026);
     setIsCreatingCareer(true);
@@ -468,7 +482,9 @@ export default function App() {
       const migratedProposals = Array.isArray(data.transferProposals) ? data.transferProposals : [];
       const migratedGameweeks = Array.isArray(data.gameweekHistory) ? data.gameweekHistory : [];
       const migratedBids = Array.isArray(data.incomingBids) ? data.incomingBids : [];
-      const importedDelegation: DelegationMatrix = data.delegation || delegation;
+      const importedDelegation: DelegationMatrix = data.delegation
+        ? normalizeDelegation(data.delegation)
+        : delegation;
 
       setClubs(hydratedClubs);
       setOwners(data.owners as Owner[]);
@@ -481,7 +497,7 @@ export default function App() {
       setTransferHistory(migratedHistory);
       setTransferProposals(migratedProposals);
       setIncomingBids(migratedBids);
-      if (data.delegation) setDelegation(importedDelegation);
+      setDelegation(importedDelegation);
 
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify({
@@ -525,6 +541,7 @@ export default function App() {
     setOwners(initOwners);
     setManagers(initManagers);
     setFreeAgents(initFA);
+    setDelegation(DEFAULT_DELEGATION);
     setDirector(null);
     setCurrentWeek(1);
     setSeasonYear(2026);
@@ -532,6 +549,11 @@ export default function App() {
     setTransferHistory([]);
     setTransferProposals([]);
     setIncomingBids([]);
+    setIsSacked(false);
+    setWeeklyDigest(null);
+    setSeasonSummary(null);
+    setNewsAlert(null);
+    setCurrentTab('dashboard');
     setIsCreatingCareer(false);
     setInMainMenu(true);
   };
@@ -540,9 +562,9 @@ export default function App() {
   const handleAdvanceWeek = () => {
     if (!director || isSimulating) return;
 
-    // If season already completed (every team has played each other twice), show finale review
-    if (currentWeek >= 46) {
-      const summary = calculateSeasonSummary(seasonYear, clubs, director, currentOwner);
+    // If all 46 weeks are already completed, show Season Finale review
+    if (currentWeek > 46) {
+      const summary = calculateSeasonSummary(seasonYear, clubs, director, currentOwner, freeAgents, transferHistory);
       setSeasonSummary(summary);
       sounds.playFanfare();
       return;
@@ -606,24 +628,32 @@ export default function App() {
       setWeeklyDigest(digest);
       setIsSimulating(false);
 
-      // When week 46 is reached, every team has played each other twice -> Trigger Season Finale!
-      if (nextWeek >= 46) {
+      // Check Sacking criteria: Board trust reaches 0
+      if (updatedDirector.boardTrust <= 0 && updatedDirector.currentClubId) {
+        setIsSacked(true);
+        sounds.playCrisis();
+      } else if (nextWeek > 46) {
+        // When week 46 finishes (nextWeek = 47), every team has played each other twice -> Trigger Season Finale
         const latestClub = updatedDirector.currentClubId
           ? updatedClubs.find(c => c.id === updatedDirector.currentClubId)
           : undefined;
         const latestOwner = latestClub
           ? finalOwners.find(o => o.id === latestClub.ownerId)
           : currentOwner;
-        const summary = calculateSeasonSummary(seasonYear, updatedClubs, updatedDirector, latestOwner);
+        const nextHistory = newTransfers && newTransfers.length > 0
+          ? capTransferHistory([...newTransfers, ...transferHistory])
+          : transferHistory;
+        const summary = calculateSeasonSummary(
+          seasonYear,
+          updatedClubs,
+          updatedDirector,
+          latestOwner,
+          updatedFreeAgents,
+          nextHistory
+        );
         setSeasonSummary(summary);
         sounds.playFanfare();
         setNewsAlert(`SEASON ${seasonYear}/${seasonYear + 1} HAS COMPLETED! Every team has played each other twice.`);
-      }
-
-      // Check Sacking criteria: Board trust reaches 0
-      if (updatedDirector.boardTrust <= 0 && updatedDirector.currentClubId) {
-        setIsSacked(true);
-        sounds.playCrisis();
       }
     }, 400);
   };
@@ -643,7 +673,11 @@ export default function App() {
     let weekCounter = currentWeek;
     const newRecords: GameweekRecord[] = [];
     const newTransfersList: TransferRecord[] = [];
+    const newBidsList: IncomingBid[] = [];
+    let takeoverAlert: string | undefined;
+    let sackedDuringSim = false;
 
+    const startWeek = currentWeek;
     while (weekCounter < 20) {
       const res = advanceSimulationWeek(
         weekCounter,
@@ -657,8 +691,14 @@ export default function App() {
         iterHistory,
         iterProposals
       );
+      const takeover = evaluateTakeoverEvents(
+        weekCounter + 1,
+        res.updatedClubs,
+        res.updatedOwners,
+        res.updatedDirector
+      );
       iterClubs = res.updatedClubs;
-      iterOwners = res.updatedOwners;
+      iterOwners = takeover.updatedOwners;
       iterManagers = res.updatedManagers;
       iterDirector = res.updatedDirector;
       iterFreeAgents = res.updatedFreeAgents;
@@ -668,7 +708,18 @@ export default function App() {
         newTransfersList.unshift(...res.newTransfers);
         iterHistory = capTransferHistory([...res.newTransfers, ...iterHistory]);
       }
+      if (res.newIncomingBids && res.newIncomingBids.length > 0) {
+        newBidsList.unshift(...res.newIncomingBids);
+      }
+      if (takeover.newsAlert) {
+        takeoverAlert = takeover.newsAlert;
+      }
       weekCounter++;
+
+      if (iterDirector.boardTrust <= 0 && iterDirector.currentClubId) {
+        sackedDuringSim = true;
+        break;
+      }
     }
 
     setClubs(iterClubs);
@@ -684,19 +735,58 @@ export default function App() {
     if (newTransfersList.length > 0) {
       setTransferHistory(prev => capTransferHistory([...newTransfersList, ...prev]));
     }
-    setCurrentWeek(20);
+    if (newBidsList.length > 0) {
+      setIncomingBids(prev => [...newBidsList, ...prev]);
+    }
+    setCurrentWeek(weekCounter);
     immediateSaveOnNextCommitRef.current = true;
     setIsSimulating(false);
+
+    if (sackedDuringSim) {
+      if (takeoverAlert) setNewsAlert(takeoverAlert);
+      setIsSacked(true);
+      sounds.playCrisis();
+      return;
+    }
+
+    const myId = iterDirector.currentClubId;
+    const coachDeals = myId
+      ? newTransfersList.filter(
+          tr =>
+            (tr.initiatedBy === 'manager' || tr.initiatedBy === 'shared') &&
+            (tr.toClubId === myId || tr.fromClubId === myId)
+        )
+      : [];
+    const signingsCount = coachDeals.filter(tr => tr.type === 'signing' && tr.toClubId === myId).length;
+    const salesCount = coachDeals.filter(tr => tr.type === 'sale' && tr.fromClubId === myId).length;
+    const renewalsCount = coachDeals.filter(tr => tr.type === 'renewal' && tr.toClubId === myId).length;
+    const promotionsCount = coachDeals.filter(tr => tr.type === 'promotion' && tr.toClubId === myId).length;
+    const newProposalsCount = iterProposals.filter(
+      p => p.status === 'pending' && p.createdWeek >= startWeek
+    ).length;
+
+    const activityParts: string[] = [];
+    if (signingsCount > 0) activityParts.push(`${signingsCount} signing${signingsCount > 1 ? 's' : ''}`);
+    if (salesCount > 0) activityParts.push(`${salesCount} sale${salesCount > 1 ? 's' : ''}`);
+    if (renewalsCount > 0) activityParts.push(`${renewalsCount} contract renewal${renewalsCount > 1 ? 's' : ''}`);
+    if (promotionsCount > 0) activityParts.push(`${promotionsCount} academy promotion${promotionsCount > 1 ? 's' : ''}`);
+    if (newProposalsCount > 0) activityParts.push(`${newProposalsCount} transfer proposal${newProposalsCount > 1 ? 's' : ''}`);
+    const activityText = activityParts.length > 0 ? ` Head Coach completed: ${activityParts.join(', ')}.` : '';
+
     sounds.playFanfare();
-    setNewsAlert(`JANUARY TRANSFER WINDOW IS NOW OPEN! The winter window is active. Review your war chest and scout reinforcements.`);
+    setNewsAlert(
+      takeoverAlert
+        ? `${takeoverAlert} — JANUARY TRANSFER WINDOW IS NOW OPEN!${activityText}`
+        : `JANUARY TRANSFER WINDOW IS NOW OPEN!${activityText || ' Review your war chest and scout reinforcements.'}`
+    );
     setCurrentTab('transfers');
   };
 
-  // Fast-Forward to Summer / Season End (Week 46 when every team has played each other twice)
+  // Fast-Forward to Summer / Season End (Week 46 completed -> nextWeek 47)
   const handleFastForwardSummer = () => {
     if (!director || isSimulating) return;
-    if (currentWeek >= 46) {
-      const summary = calculateSeasonSummary(seasonYear, clubs, director, currentOwner);
+    if (currentWeek > 46) {
+      const summary = calculateSeasonSummary(seasonYear, clubs, director, currentOwner, freeAgents, transferHistory);
       setSeasonSummary(summary);
       sounds.playFanfare();
       return;
@@ -714,6 +804,9 @@ export default function App() {
     let weekCounter = currentWeek;
     const newRecords: GameweekRecord[] = [];
     const newTransfersList: TransferRecord[] = [];
+    const newBidsList: IncomingBid[] = [];
+    let takeoverAlert: string | undefined;
+    let sackedDuringSim = false;
 
     while (weekCounter <= 46) {
       const res = advanceSimulationWeek(
@@ -728,8 +821,14 @@ export default function App() {
         iterHistory,
         iterProposals
       );
+      const takeover = evaluateTakeoverEvents(
+        weekCounter + 1,
+        res.updatedClubs,
+        res.updatedOwners,
+        res.updatedDirector
+      );
       iterClubs = res.updatedClubs;
-      iterOwners = res.updatedOwners;
+      iterOwners = takeover.updatedOwners;
       iterManagers = res.updatedManagers;
       iterDirector = res.updatedDirector;
       iterFreeAgents = res.updatedFreeAgents;
@@ -739,7 +838,18 @@ export default function App() {
         newTransfersList.unshift(...res.newTransfers);
         iterHistory = capTransferHistory([...res.newTransfers, ...iterHistory]);
       }
+      if (res.newIncomingBids && res.newIncomingBids.length > 0) {
+        newBidsList.unshift(...res.newIncomingBids);
+      }
+      if (takeover.newsAlert) {
+        takeoverAlert = takeover.newsAlert;
+      }
       weekCounter++;
+
+      if (iterDirector.boardTrust <= 0 && iterDirector.currentClubId) {
+        sackedDuringSim = true;
+        break;
+      }
     }
 
     setClubs(iterClubs);
@@ -755,14 +865,57 @@ export default function App() {
     if (newTransfersList.length > 0) {
       setTransferHistory(prev => capTransferHistory([...newTransfersList, ...prev]));
     }
-    setCurrentWeek(46);
+    if (newBidsList.length > 0) {
+      setIncomingBids(prev => [...newBidsList, ...prev]);
+    }
+    setCurrentWeek(weekCounter);
     immediateSaveOnNextCommitRef.current = true;
     setIsSimulating(false);
 
-    const summary = calculateSeasonSummary(seasonYear, iterClubs, iterDirector, currentOwner);
+    if (sackedDuringSim) {
+      if (takeoverAlert) setNewsAlert(takeoverAlert);
+      setIsSacked(true);
+      sounds.playCrisis();
+      return;
+    }
+
+    const latestClub = iterDirector.currentClubId
+      ? iterClubs.find(c => c.id === iterDirector.currentClubId)
+      : undefined;
+    const latestOwner = latestClub
+      ? iterOwners.find(o => o.id === latestClub.ownerId)
+      : currentOwner;
+    const summary = calculateSeasonSummary(
+      seasonYear,
+      iterClubs,
+      iterDirector,
+      latestOwner,
+      iterFreeAgents,
+      iterHistory
+    );
     setSeasonSummary(summary);
     sounds.playFanfare();
-    setNewsAlert(`SEASON ${seasonYear}/${seasonYear + 1} CONCLUDED! Every team has played each other twice. Review final standings.`);
+
+    const myId = iterDirector.currentClubId;
+    const coachDeals = myId
+      ? newTransfersList.filter(
+          tr =>
+            (tr.initiatedBy === 'manager' || tr.initiatedBy === 'shared') &&
+            (tr.toClubId === myId || tr.fromClubId === myId)
+        )
+      : [];
+    const signingsCount = coachDeals.filter(tr => tr.type === 'signing' && tr.toClubId === myId).length;
+    const salesCount = coachDeals.filter(tr => tr.type === 'sale' && tr.fromClubId === myId).length;
+    const renewalsCount = coachDeals.filter(tr => tr.type === 'renewal' && tr.toClubId === myId).length;
+    const promotionsCount = coachDeals.filter(tr => tr.type === 'promotion' && tr.toClubId === myId).length;
+    const activityParts: string[] = [];
+    if (signingsCount > 0) activityParts.push(`${signingsCount} signing${signingsCount > 1 ? 's' : ''}`);
+    if (salesCount > 0) activityParts.push(`${salesCount} sale${salesCount > 1 ? 's' : ''}`);
+    if (renewalsCount > 0) activityParts.push(`${renewalsCount} contract renewal${renewalsCount > 1 ? 's' : ''}`);
+    if (promotionsCount > 0) activityParts.push(`${promotionsCount} academy promotion${promotionsCount > 1 ? 's' : ''}`);
+    const activityText = activityParts.length > 0 ? ` Head Coach completed: ${activityParts.join(', ')}.` : '';
+
+    setNewsAlert(`SEASON ${seasonYear}/${seasonYear + 1} CONCLUDED!${activityText || ' Every team has played each other twice. Review final standings.'}`);
   };
 
   // Advance to Next Season (Infinite Career Progression)
@@ -776,13 +929,16 @@ export default function App() {
       newFreeAgents,
       newDirector,
       newSeasonYear,
+      newTransfers,
     } = advanceToNextSeason(
       seasonSummary,
       clubs,
       owners,
       managers,
       freeAgents,
-      director
+      director,
+      delegation,
+      transferHistory
     );
 
     immediateSaveOnNextCommitRef.current = true;
@@ -790,6 +946,9 @@ export default function App() {
     setOwners(newOwners);
     setManagers(newManagers);
     setFreeAgents(newFreeAgents);
+    if (newTransfers.length > 0) {
+      setTransferHistory(prev => capTransferHistory([...newTransfers, ...prev]));
+    }
     setSeasonYear(newSeasonYear);
     setCurrentWeek(1);
     setGameweekHistory([]);
@@ -799,7 +958,11 @@ export default function App() {
       setDirector(newDirector);
       setTransferProposals(prev => prev.map(p => (p.status === 'pending' ? { ...p, status: 'expired' as const } : p)));
       setCurrentTab('dashboard');
-      setNewsAlert(`SEASON ${newSeasonYear}/${newSeasonYear + 1} HAS BEGUN! Promotions & relegations applied, TV cash disbursed, and the Summer Transfer Window is now open.`);
+      const renewalNote =
+        newTransfers.length > 0
+          ? ` Head Coach completed ${newTransfers.length} off-season contract renewal${newTransfers.length > 1 ? 's' : ''}.`
+          : '';
+      setNewsAlert(`SEASON ${newSeasonYear}/${newSeasonYear + 1} HAS BEGUN! Promotions & relegations applied, TV cash disbursed, and the Summer Transfer Window is now open.${renewalNote}`);
     } else {
       // Step down and explore vacancies
       const resignedDirector = {
@@ -830,15 +993,25 @@ export default function App() {
     updatedClub: Club,
     updatedOwner: Owner
   ) => {
-    if (newManager) {
-      setManagers(prev => {
-        const exists = prev.some(m => m.id === newManager.id);
-        if (exists) {
-          return prev.map(m => m.id === newManager.id ? newManager : m);
+    const prevClub = clubs.find(c => c.id === updatedClub.id);
+    const previousManagerId = prevClub?.managerId;
+
+    setManagers(prev => {
+      let next = prev.map(m => {
+        // Release any incumbent manager attached to this club when sacked or replaced
+        if ((m.clubId === updatedClub.id || (previousManagerId && m.id === previousManagerId)) && m.id !== newManager?.id) {
+          return { ...m, clubId: null };
         }
-        return [...prev, newManager];
+        if (newManager && m.id === newManager.id) {
+          return newManager;
+        }
+        return m;
       });
-    }
+      if (newManager && !next.some(m => m.id === newManager.id)) {
+        next = [...next, newManager];
+      }
+      return next;
+    });
 
     let nextLineup = updatedClub.lineup;
     if (nextLineup) {
@@ -926,6 +1099,20 @@ export default function App() {
     setClubs(prev => prev.map(c => c.id === syncedClub.id ? syncedClub : c));
   };
 
+  // Handle Rival Academy Prospect Poach
+  const handleCompleteAcademyPoach = (
+    updatedClubs: Club[],
+    updatedDirector: Director,
+    record: TransferRecord
+  ) => {
+    setClubs(updatedClubs);
+    setDirector(updatedDirector);
+    setTransferHistory(prev => capTransferHistory([record, ...prev]));
+    setNewsAlert(
+      `YOUTH POACH: ${record.playerName} (${record.position}, Age ${record.age}) acquired for £${(record.fee / 1000000).toFixed(2)}M compensation.`
+    );
+  };
+
   // Handle Transfer Completion (using shared transferService result)
   const handleCompleteTransfer = (
     updatedClubs: Club[],
@@ -943,6 +1130,8 @@ export default function App() {
       setManagers(prev => prev.map(m => m.id === updatedManager.id ? updatedManager : m));
     }
     setTransferHistory(prev => capTransferHistory([record, ...prev]));
+    setTransferProposals(prev => prev.map(p => (p.playerId === record.playerId && p.status === 'pending' ? { ...p, status: 'expired' as const } : p)));
+    setIncomingBids(prev => prev.map(b => (b.playerId === record.playerId && b.status === 'pending' ? { ...b, status: 'rejected' as const } : b)));
   };
 
   // Sell player directly from SquadView Sell/Release popup
@@ -966,11 +1155,8 @@ export default function App() {
       season: seasonYear,
       week: currentWeek,
       initiatedBy: 'director',
+      trustDelta,
     });
-
-    if (trustDelta !== 0 && result.manager) {
-      result.manager.trustInDirector = Math.max(0, Math.min(100, result.manager.trustInDirector + trustDelta));
-    }
 
     setClubs(result.clubs);
     setDirector(result.director);
@@ -1176,10 +1362,14 @@ export default function App() {
   };
 
   // Accept incoming transfer bid (transfers player, credits fee, frees wage, logs history)
-  const handleAcceptBid = (bidId: string, trustDelta = 0) => {
-    if (!director?.currentClubId) return;
+  const handleAcceptBid = (bidId: string, trustDelta = 0): { ok: boolean; error?: string } => {
+    if (!director?.currentClubId) {
+      return { ok: false, error: 'No active club appointment.' };
+    }
     const bid = incomingBids.find(b => b.id === bidId);
-    if (!bid || bid.status !== 'pending') return;
+    if (!bid || bid.status !== 'pending') {
+      return { ok: false, error: 'This transfer offer is no longer pending.' };
+    }
 
     try {
       const { updatedClubs, updatedDirector, newTransferRecord } = acceptIncomingBid(
@@ -1201,6 +1391,7 @@ export default function App() {
         ));
       }
       setTransferHistory(prev => capTransferHistory([newTransferRecord, ...prev]));
+      setTransferProposals(prev => prev.map(p => (p.playerId === bid.playerId && p.status === 'pending' ? { ...p, status: 'expired' as const } : p)));
       setIncomingBids(prev => prev.map(b => {
         if (b.id === bidId) {
           return { ...b, status: 'accepted' as const };
@@ -1213,8 +1404,14 @@ export default function App() {
       }));
       sounds.playSigningStamp();
       setNewsAlert(`TRANSFER AGREED: ${bid.playerName} has officially transferred to ${bid.buyingClubName} for £${(bid.offeredFee / 1000000).toFixed(2)}M.`);
+      return { ok: true };
     } catch (err) {
       console.error('Failed to accept transfer bid', err);
+      const message = err instanceof Error ? err.message : 'Unable to complete incoming transfer bid.';
+      setIncomingBids(prev => prev.map(b => (b.id === bidId ? { ...b, status: 'rejected' as const } : b)));
+      setNewsAlert(message);
+      sounds.playCrisis();
+      return { ok: false, error: message };
     }
   };
 
@@ -1243,7 +1440,12 @@ export default function App() {
         return c;
       })
     );
-    setDirector(updatedDirector);
+    const cleanDirector: Director = {
+      ...updatedDirector,
+      lastPetitionWeek: undefined,
+      lastPetitionSeason: undefined,
+    };
+    setDirector(cleanDirector);
     setTransferProposals([]);
     setIncomingBids([]);
     setCurrentTab('dashboard');
@@ -1379,6 +1581,8 @@ export default function App() {
             owner={currentOwner}
             manager={currentManager}
             allClubs={clubs}
+            freeAgents={freeAgents}
+            transferHistory={transferHistory}
             currentWeek={currentWeek}
             seasonYear={seasonYear}
             gameweekHistory={gameweekHistory}
@@ -1389,11 +1593,39 @@ export default function App() {
         )}
 
         <ErrorBoundary resetKey={currentTab}>
+          {!currentClub && currentTab !== 'dashboard' && currentTab !== 'jobs' && (
+            <div className="bg-[#111827] border border-white/10 rounded-2xl p-6 sm:p-8 text-center space-y-4">
+              <div className="space-y-1">
+                <span className="text-xs font-bold uppercase tracking-wider text-amber-400 block">
+                  Unemployed Executive Status
+                </span>
+                <h2 className="text-xl sm:text-2xl font-extrabold text-white">
+                  No Active Club Appointment
+                </h2>
+                <p className="text-xs sm:text-sm text-slate-400 max-w-md mx-auto">
+                  You must sign with a club in the Job Market before accessing club boardroom, squad, or transfer operations.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  sounds.playClick();
+                  setCurrentTab('jobs');
+                }}
+                className="min-h-11 px-6 py-2.5 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-extrabold text-xs rounded-xl shadow-lg shadow-amber-500/20 cursor-pointer active:scale-95 transition-all"
+              >
+                Open Job Market
+              </button>
+            </div>
+          )}
+
           {currentTab === 'boardroom' && currentClub && currentOwner && (
             <BoardroomView
               club={currentClub}
               owner={currentOwner}
               director={director}
+              currentWeek={currentWeek}
+              seasonYear={seasonYear}
               onUpdateClub={handleUpdateClubFromBoardroom}
             />
           )}
@@ -1438,8 +1670,16 @@ export default function App() {
           {currentTab === 'academy' && currentClub && (
             <YouthAcademyView
               club={currentClub}
+              allClubs={clubs}
+              manager={currentManager}
+              director={director}
+              owner={currentOwner}
+              delegation={delegation}
+              transferHistory={transferHistory}
               seasonYear={seasonYear}
+              currentWeek={currentWeek}
               onUpdateClub={handleUpdateClubFromAcademy}
+              onCompletePoach={handleCompleteAcademyPoach}
             />
           )}
 
@@ -1543,6 +1783,8 @@ export default function App() {
             playerClub={currentClub}
             director={director}
             owner={currentOwner}
+            manager={currentManager}
+            transferHistory={transferHistory}
             onAdvanceToNextSeason={handleAdvanceToNextSeason}
             onUpdateClub={handleUpdateClubFromAcademy}
             onBackToMainMenu={handleBackToMainMenu}

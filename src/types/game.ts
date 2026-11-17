@@ -41,6 +41,7 @@ export interface Player {
   isInjured?: boolean;
   injuryWeeks?: number;
   effectiveOverall?: number;
+  retiringAtSeasonEnd?: boolean;
 }
 
 export type OwnerWealth = 'frugal' | 'moderate' | 'wealthy' | 'oligarch';
@@ -250,6 +251,8 @@ export interface Director {
   contractYears: number;
   salary: number; // In £/week
   netSpend: number;
+  lastPetitionWeek?: number;
+  lastPetitionSeason?: number;
 }
 
 export interface MatchEvent {
@@ -290,6 +293,18 @@ export interface ManagerSigningEvent {
   reason: string;
 }
 
+export interface AcademyWireEvent {
+  id: string;
+  kind: 'promotion' | 'poach' | 'retirement_notice';
+  playerName: string;
+  position: PlayerPosition;
+  age: number;
+  overall: number;
+  clubName: string;
+  fromClubName?: string;
+  detail: string;
+}
+
 export interface WeeklyDigest {
   week: number;
   seasonYear: number;
@@ -304,6 +319,7 @@ export interface WeeklyDigest {
   matchFormation?: FormationId;
   matchTeamRating?: number;
   lineupNotices?: string[];
+  academyWire?: AcademyWireEvent[];
 }
 
 export interface IncomingBid {
@@ -362,6 +378,35 @@ export interface SeasonAward {
   relegatedClubs: Club[];
 }
 
+export interface RetirementRecord {
+  playerId: string;
+  name: string;
+  nationality: string;
+  age: number;
+  position: PlayerPosition;
+  overall: number;
+  clubId: string | null;
+  clubName: string;
+  clubShortName?: string;
+  clubTier?: LeagueTier;
+  appearances: number;
+  goals: number;
+  assists: number;
+  cleanSheets: number;
+  isUserClub: boolean;
+}
+
+export interface SeasonGraduateHighlight {
+  playerId: string;
+  playerName: string;
+  clubId: string;
+  clubName: string;
+  clubTier: LeagueTier;
+  position: PlayerPosition;
+  age: number;
+  overall: number;
+}
+
 export interface SeasonSummary {
   seasonYear: number;
   tier1: SeasonAward;
@@ -377,6 +422,9 @@ export interface SeasonSummary {
   prizeMoney: number;
   tvRevenue: number;
   graduatingProspects?: AcademyPlayer[];
+  retirements?: RetirementRecord[];
+  totalLeaguePromotions?: number;
+  topLeagueGraduates?: SeasonGraduateHighlight[];
 }
 
 export interface GameweekStandingsEntry {

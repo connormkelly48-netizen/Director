@@ -50,7 +50,7 @@ export const ResponsibilitiesView: React.FC<ResponsibilitiesViewProps> = ({
           (r.initiatedBy === 'manager' || r.initiatedBy === 'shared') &&
           (r.toClubId === club.id || r.fromClubId === club.id)
       )
-      .slice(0, 5);
+      .slice(0, 10);
   }, [transferHistory, club.id]);
 
   const getSigningsExplanation = () => {
@@ -264,7 +264,7 @@ export const ResponsibilitiesView: React.FC<ResponsibilitiesViewProps> = ({
                 <span>
                   {delegation.contractRenewals === 'director'
                     ? 'You approve every contract extension and wage bump directly from the Squad screen.'
-                    : 'Your preference is saved for Coach-led renewals; you can still negotiate extensions manually in Squad.'}
+                    : 'Your Head Coach automatically evaluates and extends contracts for key starters, in-form favorites, and core depth with 1 year or less remaining (plus a final pass before season-end expiry); you can still negotiate extensions manually in Squad.'}
                 </span>
               </div>
             </div>
@@ -309,7 +309,7 @@ export const ResponsibilitiesView: React.FC<ResponsibilitiesViewProps> = ({
                 <span>
                   {delegation.youthPromotion === 'director'
                     ? 'You retain exclusive control over promoting Youth Academy prospects to senior contracts.'
-                    : 'Your preference for Coach-led youth calls is recorded; manual promotions remain available in Youth Academy.'}
+                    : 'Head Coach automatically promotes ready prospects during pre-season, weekly squad reviews, and the end-of-season pass; manual promotions remain available in Youth Academy.'}
                 </span>
               </div>
             </div>
@@ -443,16 +443,21 @@ export const ResponsibilitiesView: React.FC<ResponsibilitiesViewProps> = ({
 
             {recentManagerDecisions.length === 0 ? (
               <div className="bg-slate-900/60 border border-white/5 rounded-xl p-4 text-xs text-slate-400 leading-relaxed">
-                No Head Coach transfer signings, sales, or approved proposals yet. Set Signings or Sales to{' '}
-                <strong className="text-slate-200">Manager Control</strong> or{' '}
-                <strong className="text-slate-200">Shared Consensus</strong> during transfer windows (Weeks 1–6 & 20–24).
+                No Head Coach signings, sales, contract renewals, or promotions recorded yet. Delegate Signings/Sales during transfer windows (Weeks 1–6 & 20–24) or switch Contract Renewals & Youth Promotions to Coach-led.
               </div>
             ) : (
               <div className="space-y-2.5">
                 {recentManagerDecisions.map(rec => {
                   const fromLabel = rec.fromClubId ? (clubNameMap.get(rec.fromClubId) || rec.fromClubId) : 'Free Agent';
                   const toLabel = rec.toClubId ? (clubNameMap.get(rec.toClubId) || rec.toClubId) : 'Released';
-                  const isSigning = rec.type === 'signing';
+                  const badgeStyle =
+                    rec.type === 'signing'
+                      ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                      : rec.type === 'renewal'
+                        ? 'bg-amber-400/10 text-amber-300 border-amber-400/30'
+                        : rec.type === 'promotion'
+                          ? 'bg-purple-500/10 text-purple-300 border-purple-500/30'
+                          : 'bg-blue-500/10 text-blue-300 border-blue-500/30';
                   return (
                     <div
                       key={rec.id}
@@ -461,11 +466,7 @@ export const ResponsibilitiesView: React.FC<ResponsibilitiesViewProps> = ({
                       <div className="flex items-center justify-between gap-2">
                         <div className="flex items-center gap-1.5 min-w-0">
                           <span
-                            className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded border shrink-0 ${
-                              isSigning
-                                ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
-                                : 'bg-blue-500/10 text-blue-300 border-blue-500/30'
-                            }`}
+                            className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded border shrink-0 ${badgeStyle}`}
                           >
                             {rec.type}
                           </span>
@@ -492,14 +493,18 @@ export const ResponsibilitiesView: React.FC<ResponsibilitiesViewProps> = ({
                           </span>
                         </span>
                         <span className="text-xs font-mono font-bold text-amber-400 shrink-0">
-                          {rec.fee > 0 ? `£${(rec.fee / 1000000).toFixed(2)}m` : 'Free'}
+                          {rec.type === 'renewal'
+                            ? `${rec.contractYears}y · £${(rec.wage / 1000).toFixed(0)}k/wk`
+                            : rec.fee > 0
+                              ? `£${(rec.fee / 1000000).toFixed(2)}m`
+                              : 'Free'}
                         </span>
                       </div>
 
                       <div className="flex items-center gap-1 text-[11px] text-slate-400 truncate">
                         <ArrowRightLeft className="w-3 h-3 text-slate-500 shrink-0" />
                         <span className="truncate">
-                          {fromLabel} → {toLabel}
+                          {rec.type === 'renewal' ? `${toLabel} (Contract Extension)` : `${fromLabel} → ${toLabel}`}
                         </span>
                       </div>
 

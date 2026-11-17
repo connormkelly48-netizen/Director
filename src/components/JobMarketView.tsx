@@ -102,8 +102,10 @@ export const JobMarketView: React.FC<JobMarketViewProps> = ({
     setInterviewResult(null);
     setCanSignContract(false);
 
-    const owner = allOwners.find(o => o.name === vac.ownerName);
-    const ownerPhil = owner?.recruitmentPhilosophy || 'youth_development';
+    const targetClub = allClubs.find(c => c.id === vac.clubId);
+    const owner =
+      allOwners.find(o => o.id === targetClub?.ownerId) ||
+      allOwners.find(o => o.name === vac.ownerName);
 
     setInterviewQuestion({
       q: `Chairman ${vac.ownerName}: "Welcome to ${vac.clubName}. Our objective is ${vac.expectation}. Given our financial parameters, what would be your primary recruitment directive in the upcoming window?"`,
@@ -131,8 +133,10 @@ export const JobMarketView: React.FC<JobMarketViewProps> = ({
   const handleAnswer = (fitsPhilosophy: string) => {
     sounds.playClick();
     if (!selectedVacancy) return;
-    const owner = allOwners.find(o => o.name === selectedVacancy.ownerName);
     const targetClub = allClubs.find(c => c.id === selectedVacancy.clubId);
+    const owner =
+      allOwners.find(o => o.id === targetClub?.ownerId) ||
+      allOwners.find(o => o.name === selectedVacancy.ownerName);
 
     // Reputation check
     if (director.reputation < selectedVacancy.reputationRequired - 10) {

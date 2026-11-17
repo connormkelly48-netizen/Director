@@ -51,7 +51,7 @@ const PHILOSOPHIES: Array<{ id: DirectorPhilosophy; title: string; desc: string;
 
 export const CharacterCreationModal: React.FC<CharacterCreationModalProps> = ({ clubs, owners, onComplete, onBackToMainMenu }) => {
   const [name, setName] = useState('Alexander Vance');
-  const [age, setAge] = useState(42);
+  const [ageInput, setAgeInput] = useState('42');
   const [nationality] = useState('British');
   const [philosophy, setPhilosophy] = useState<DirectorPhilosophy>('Moneyball Data');
   const [selectedTier, setSelectedTier] = useState<1 | 2 | 3>(1);
@@ -66,9 +66,12 @@ export const CharacterCreationModal: React.FC<CharacterCreationModalProps> = ({ 
     e.preventDefault();
     sounds.playGavel();
 
+    const parsedAge = parseInt(ageInput, 10);
+    const clampedAge = Number.isFinite(parsedAge) ? Math.min(75, Math.max(28, parsedAge)) : 40;
+
     const director: Director = {
       name: name.trim() || 'Director',
-      age: Number(age) || 40,
+      age: clampedAge,
       nationality,
       favouriteClubId,
       currentClubId: selectedClub.id,
@@ -174,8 +177,12 @@ export const CharacterCreationModal: React.FC<CharacterCreationModalProps> = ({ 
               inputMode="numeric"
               min={28}
               max={75}
-              value={age}
-              onChange={e => setAge(Number(e.target.value))}
+              value={ageInput}
+              onChange={e => setAgeInput(e.target.value)}
+              onBlur={() => {
+                const parsed = parseInt(ageInput, 10);
+                setAgeInput(String(Number.isFinite(parsed) ? Math.min(75, Math.max(28, parsed)) : 40));
+              }}
               required
               className="w-full min-h-11 lg:min-h-0 px-3.5 py-2.5 bg-slate-900/90 border border-white/10 rounded-lg text-white text-base md:text-sm font-mono focus:outline-none focus:border-amber-400"
             />

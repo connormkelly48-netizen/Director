@@ -3,23 +3,26 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Club, Director, FormationId, Lineup, Manager, MatchResult, Owner, Player, WeeklyDigest, PressHeadline, BoardroomMemo, DelegationMatrix, JobVacancy, SeasonSummary, SeasonAward, LeagueTier, AcademyPlayer, ProspectTrait, PlayerPosition, GrowthMomentum, MomentumTier, MoraleLevel, GameweekRecord, GameweekStandingsEntry, TransferRecord, TransferProposal, IncomingBid, ManagerSigningEvent } from '../types/game';
+import { Club, Director, FormationId, Lineup, Manager, MatchResult, Owner, Player, WeeklyDigest, PressHeadline, BoardroomMemo, DelegationMatrix, JobVacancy, SeasonSummary, SeasonAward, LeagueTier, AcademyPlayer, ProspectTrait, PlayerPosition, GrowthMomentum, MomentumTier, MoraleLevel, GameweekRecord, GameweekStandingsEntry, TransferRecord, TransferProposal, IncomingBid, ManagerSigningEvent, AcademyWireEvent, RetirementRecord, SeasonGraduateHighlight } from '../types/game';
 import { TAKEOVER_CANDIDATES } from '../data/database';
 import {
   parseFormation,
   selectStartingXI,
   expireTransferProposals,
   runManagerTransferActivity,
+  runManagerContractRenewals,
 } from './transferService';
 import {
   autoPickLineup,
   computeTeamRating,
   extractFormationNumber,
   getDefaultFormation,
+  getSlotFit,
   prepareUserLineupForMatch,
   resolveClubLineup,
   syncLineupAfterSquadChange,
 } from '../utils/lineup';
+import { FORMATIONS } from '../data/formations';
 
 export { parseFormation, selectStartingXI };
 
@@ -77,10 +80,25 @@ export function deriveMorale(happiness: number): MoraleLevel {
 // Calculate team rating from starting XI taking into account getSlotFit penalties and +0.5% formation comfort
 export function getTeamMatchRating(club: Club, manager?: Manager, cachedLineup?: Lineup): number {
   const lineup = cachedLineup ?? resolveClubLineup(club, manager);
-  const starting11 = selectStartingXI(club, manager, lineup);
-  if (starting11.length === 0) return 60;
+  const def = FORMATIONS[lineup.formation] || FORMATIONS['4-3-3'];
+  const healthyById = new Map(club.squad.filter(p => !p.isInjured).map(p => [p.id, p]));
+  const seen = new Set<string>();
+  let totalOvr = 0;
+  let starterCount = 0;
 
-  const avgOvr = starting11.reduce((acc, p) => acc + (p.effectiveOverall ?? p.overall), 0) / starting11.length;
+  for (let i = 0; i < def.slots.length; i++) {
+    const pid = lineup.slots[i];
+    if (!pid || seen.has(pid)) continue;
+    const player = healthyById.get(pid);
+    if (!player) continue;
+    totalOvr += getSlotFit(player, def.slots[i].role).effectiveOverall;
+    seen.add(pid);
+    starterCount += 1;
+  }
+
+  if (starterCount === 0) return 60;
+
+  const avgOvr = totalOvr / starterCount;
   const mgrBonus = manager ? (manager.reputation / 100) * 4 : 0;
   const trustModifier = manager ? ((manager.trustInDirector - 50) / 100) * 3 : 0;
 
@@ -101,7 +119,8 @@ export function simulateMatch(
   awayClub: Club,
   homeManager?: Manager,
   awayManager?: Manager,
-  lineupCache?: Map<string, Lineup>
+  lineupCache?: Map<string, Lineup>,
+  newlyInjuredIds?: Set<string>
 ): MatchResult {
   const homeLineup = lineupCache?.get(homeClub.id) ?? resolveClubLineup(homeClub, homeManager);
   const awayLineup = lineupCache?.get(awayClub.id) ?? resolveClubLineup(awayClub, awayManager);
@@ -229,6 +248,7 @@ export function simulateMatch(
 
         p.isInjured = true;
         p.injuryWeeks = weeks;
+        newlyInjuredIds?.add(p.id);
 
         events.push({
           minute: Math.floor(Math.random() * 80) + 8,
@@ -390,13 +410,16 @@ export function computeGrowthMomentum(player: Player): GrowthMomentum {
 
 // Player progression & regression engine - Uncapped dynamic 99 ceiling
 // Balanced weekly chances so young players develop ~1-2 OVR per season
-export function processSquadProgression(squad: Player[]): { growthCount: number; declineCount: number } {
+export function processSquadProgression(
+  squad: Player[],
+  newlyInjuredIds?: Set<string>
+): { growthCount: number; declineCount: number } {
   let growthCount = 0;
   let declineCount = 0;
 
   squad.forEach(p => {
-    // 1. Injury recovery ALWAYS runs for every player
-    if (p.isInjured) {
+    // 1. Injury recovery runs only for pre-existing injuries (not sustained in this matchday)
+    if (p.isInjured && !newlyInjuredIds?.has(p.id)) {
       if (p.injuryWeeks && p.injuryWeeks > 0) {
         p.injuryWeeks -= 1;
       }
@@ -604,13 +627,13 @@ export function simulateAITransfersForWeek(
   // Decide how many AI deals to attempt this week (1 to 2 deals during open windows)
   const dealsToAttempt = Math.floor(Math.random() * 2) + 1;
   const aiClubs = Array.from(clubsMap.values()).filter(
-    c => c.id !== directorClubId && c.transferBudget > 2000000
+    c => c.id !== directorClubId && c.transferBudget > 2000000 && c.squad.length < 25
   );
 
   for (let i = 0; i < dealsToAttempt; i++) {
     if (aiClubs.length < 2) break;
     const buyer = aiClubs[Math.floor(Math.random() * aiClubs.length)];
-    if (!buyer || buyer.transferBudget < 1500000) continue;
+    if (!buyer || buyer.transferBudget < 1500000 || buyer.squad.length >= 25) continue;
 
     // Pick a selling AI club (different from buyer, maintaining minimum squad depth)
     const eligibleSellers = Array.from(clubsMap.values()).filter(
@@ -662,6 +685,53 @@ export function simulateAITransfersForWeek(
         contractYears: transferredPlayer.contractYears,
         initiatedBy: 'ai',
       });
+    }
+  }
+
+  // Occasional AI-to-AI youth academy poach during open transfer windows
+  if (Math.random() < 0.22 && aiClubs.length >= 2) {
+    const poacher = aiClubs[Math.floor(Math.random() * aiClubs.length)];
+    const poachTargets = Array.from(clubsMap.values()).filter(
+      c =>
+        c.id !== poacher.id &&
+        c.id !== directorClubId &&
+        (c.academy?.length || 0) > 2
+    );
+    if (poacher && poacher.squad.length < 24 && poachTargets.length > 0) {
+      const seller = poachTargets[Math.floor(Math.random() * poachTargets.length)];
+      const candidates = (seller.academy || []).filter(
+        a => a.age >= 17 && (a.momentumTier === 'Generational Prodigy' || a.momentumTier === 'High Tempo' || a.overall >= 58)
+      );
+      if (candidates.length > 0) {
+        const prospect = candidates[Math.floor(Math.random() * candidates.length)];
+        const fee = calculatePoachCompensation(prospect, seller);
+        const wage = getAcademyPromotionWage(poacher.tier);
+        const currentWages = poacher.squad.reduce((sum, p) => sum + p.wage, 0);
+        if (poacher.transferBudget >= fee && poacher.balance >= fee && currentWages + wage <= poacher.wageBudget) {
+          poacher.transferBudget -= fee;
+          poacher.balance -= fee;
+          seller.transferBudget += fee;
+          seller.balance += fee;
+          seller.academy = (seller.academy || []).filter(a => a.id !== prospect.id);
+
+          const poachedPlayer = buildPromotedPlayerFromProspect(prospect, poacher, wage, 4);
+          poacher.squad.push(poachedPlayer);
+
+          newTransfers.push(
+            createTransferRecord(
+              poachedPlayer,
+              'signing',
+              seller.id,
+              poacher.id,
+              fee,
+              seasonYear,
+              currentWeek,
+              'ai',
+              `Poached from ${seller.name} Youth Academy`
+            )
+          );
+        }
+      }
     }
   }
 
@@ -788,6 +858,8 @@ export function advanceSimulationWeek(
   const tier2Ids = clubs.filter(c => c.tier === 2).map(c => c.id);
   const tier3Ids = clubs.filter(c => c.tier === 3).map(c => c.id);
 
+  const newlyInjuredIds = new Set<string>();
+
   const simulateTier = (tierClubIds: string[]) => {
     const pairings = generatePairingsForWeek(tierClubIds, currentWeek);
     pairings.forEach(({ homeId, awayId }) => {
@@ -796,7 +868,7 @@ export function advanceSimulationWeek(
       const homeMgr = homeClub.managerId ? managersMap.get(homeClub.managerId) : undefined;
       const awayMgr = awayClub.managerId ? managersMap.get(awayClub.managerId) : undefined;
 
-      const res = simulateMatch(homeClub, awayClub, homeMgr, awayMgr, weeklyLineupCache);
+      const res = simulateMatch(homeClub, awayClub, homeMgr, awayMgr, weeklyLineupCache, newlyInjuredIds);
       applyMatchToClubs(res, homeClub, awayClub);
       allResults.push(res);
 
@@ -825,7 +897,7 @@ export function advanceSimulationWeek(
 
   // Process player growth/decline and injury recovery for EVERY club each week
   clubsMap.forEach(club => {
-    const { growthCount, declineCount } = processSquadProgression(club.squad);
+    const { growthCount, declineCount } = processSquadProgression(club.squad, newlyInjuredIds);
     if (director.currentClubId && club.id === director.currentClubId) {
       totalGrowth = growthCount;
       totalDecline = declineCount;
@@ -912,6 +984,122 @@ export function advanceSimulationWeek(
     managerSigning = managerActivity.managerSigning;
   }
 
+  const academyWire: AcademyWireEvent[] = [];
+
+  // Check for Manager-Controlled Youth Academy Promotions for MY club only
+  const postTransferPlayerClub = myClubId ? clubsMap.get(myClubId) : undefined;
+  const postTransferPlayerManager =
+    postTransferPlayerClub && postTransferPlayerClub.managerId
+      ? managersMap.get(postTransferPlayerClub.managerId)
+      : undefined;
+
+  if (myClubId && postTransferPlayerClub) {
+    const youthActivity = runManagerYouthPromotion({
+      myClubId,
+      club: postTransferPlayerClub,
+      manager: postTransferPlayerManager,
+      currentWeek,
+      seasonYear,
+      delegation,
+      transferHistory: [...newTransfers, ...transferHistory],
+    });
+    clubsMap.set(myClubId, youthActivity.updatedClub);
+    if (youthActivity.newTransfers.length > 0) {
+      newTransfers.unshift(...youthActivity.newTransfers);
+      youthActivity.newTransfers.forEach(tr => {
+        academyWire.push({
+          id: `wire_${tr.id}`,
+          kind: 'promotion',
+          playerName: tr.playerName,
+          position: tr.position,
+          age: tr.age,
+          overall: tr.overall,
+          clubName: postTransferPlayerClub.name,
+          detail: tr.note || `Promoted to ${postTransferPlayerClub.shortName} senior squad`,
+        });
+      });
+    }
+    if (youthActivity.pressHeadlines.length > 0) {
+      managerPressHeadlines.push(...youthActivity.pressHeadlines);
+    }
+  }
+
+  // Check for Manager-Controlled Contract Renewals for MY club only
+  const postYouthPlayerClub = myClubId ? clubsMap.get(myClubId) : undefined;
+  const postYouthPlayerManager =
+    postYouthPlayerClub && postYouthPlayerClub.managerId
+      ? managersMap.get(postYouthPlayerClub.managerId)
+      : undefined;
+
+  if (myClubId && postYouthPlayerClub) {
+    const renewalActivity = runManagerContractRenewals({
+      myClubId,
+      club: postYouthPlayerClub,
+      manager: postYouthPlayerManager,
+      currentWeek,
+      seasonYear,
+      delegation,
+      transferHistory: [...newTransfers, ...transferHistory],
+    });
+    clubsMap.set(myClubId, renewalActivity.updatedClub);
+    if (renewalActivity.newTransfers.length > 0) {
+      newTransfers.unshift(...renewalActivity.newTransfers);
+    }
+    if (renewalActivity.pressHeadlines.length > 0) {
+      managerPressHeadlines.push(...renewalActivity.pressHeadlines);
+    }
+  }
+
+  // Run AI club academy promotions across all other 67 clubs
+  const aiPromoResult = runAIAcademyPromotionsForWeek({
+    currentWeek,
+    seasonYear,
+    clubsMap,
+    directorClubId: myClubId,
+    transferHistory: [...newTransfers, ...transferHistory],
+  });
+  if (aiPromoResult.newTransfers.length > 0) {
+    newTransfers.unshift(...aiPromoResult.newTransfers);
+  }
+  if (aiPromoResult.wireEvents.length > 0) {
+    academyWire.push(...aiPromoResult.wireEvents);
+  }
+
+  // Add notable AI poach deals from this week to the academy wire
+  newTransfers
+    .filter(tr => tr.initiatedBy === 'ai' && tr.note?.startsWith('Poached from '))
+    .slice(0, 1)
+    .forEach(tr => {
+      const buyerClub = tr.toClubId ? clubsMap.get(tr.toClubId) : undefined;
+      const sellerClub = tr.fromClubId ? clubsMap.get(tr.fromClubId) : undefined;
+      if (buyerClub && sellerClub) {
+        academyWire.push({
+          id: `wire_poach_${tr.id}`,
+          kind: 'poach',
+          playerName: tr.playerName,
+          position: tr.position,
+          age: tr.age,
+          overall: tr.overall,
+          clubName: buyerClub.name,
+          fromClubName: sellerClub.name,
+          detail: `Signed from ${sellerClub.shortName} Academy for £${(tr.fee / 1000000).toFixed(2)}M compensation`,
+        });
+      }
+    });
+
+  // Process weekly veteran retirement announcements (Weeks 24-45)
+  const retirementNoticeResult = processWeeklyRetirementNotices(
+    currentWeek,
+    clubsMap,
+    myClubId
+  );
+  if (retirementNoticeResult.wireEvents.length > 0) {
+    academyWire.push(...retirementNoticeResult.wireEvents);
+  }
+  if (retirementNoticeResult.pressHeadlines.length > 0) {
+    managerPressHeadlines.push(...retirementNoticeResult.pressHeadlines);
+  }
+
   // Re-read my club from the updated working map before doing anything else
   const latestPlayerClub = myClubId ? clubsMap.get(myClubId) : undefined;
   const latestPlayerOwner = latestPlayerClub ? ownersMap.get(latestPlayerClub.ownerId) : undefined;
@@ -962,6 +1150,21 @@ export function advanceSimulationWeek(
         tone: 'neutral' as const,
       };
 
+  // Apply the advertised 3-win streak +5 Board Trust & Fan Approval boost when the praising memo fires
+  if (boardroomMemo.tone === 'praising') {
+    finalDirector = {
+      ...finalDirector,
+      boardTrust: Math.min(100, finalDirector.boardTrust + 5),
+      fanApproval: Math.min(100, finalDirector.fanApproval + 5),
+    };
+    if (latestPlayerOwner) {
+      ownersMap.set(latestPlayerOwner.id, {
+        ...latestPlayerOwner,
+        approval: Math.min(100, latestPlayerOwner.approval + 5),
+      });
+    }
+  }
+
   const dressingRoomSnippet = latestPlayerManager
     ? `Manager ${latestPlayerManager.name} reports squad morale is ${latestPlayerManager.trustInDirector > 60 ? 'high and aligned with board targets' : 'strained due to boardroom friction'}.`
     : 'No active manager currently in the dugout.';
@@ -980,6 +1183,7 @@ export function advanceSimulationWeek(
     ...(playerMatch && matchFormation ? { matchFormation } : {}),
     ...(playerMatch && matchTeamRating !== undefined ? { matchTeamRating } : {}),
     ...(playerMatch && lineupNotices.length > 0 ? { lineupNotices } : {}),
+    ...(academyWire.length > 0 ? { academyWire: academyWire.slice(0, 5) } : {}),
   };
 
   const standingsSnapshot: Record<string, GameweekStandingsEntry> = {};
@@ -1113,7 +1317,9 @@ export function calculateSeasonSummary(
   seasonYear: number,
   clubs: Club[],
   director: Director,
-  owner?: Owner
+  owner?: Owner,
+  freeAgents: Player[] = [],
+  transferHistory: TransferRecord[] = []
 ): SeasonSummary {
   const sortByTable = (tierClubs: Club[]) => {
     return [...tierClubs].sort((a, b) => b.points - a.points || b.goalDifference - a.goalDifference || b.goalsFor - a.goalsFor);
@@ -1213,6 +1419,31 @@ export function calculateSeasonSummary(
     ownerEvaluation = `CATASTROPHIC FAILURE. Relegation is a devastating financial and sporting disaster for ${playerClub?.name}. The board is convening an emergency review of all football operations.`;
   }
 
+  const retirements = determineSeasonRetirements(clubs, freeAgents, director.currentClubId);
+
+  const clubsById = new Map(clubs.map(c => [c.id, c]));
+  const seasonPromotions = transferHistory.filter(
+    tr => tr.season === seasonYear && tr.type === 'promotion' && tr.toClubId
+  );
+  const topLeagueGraduates: SeasonGraduateHighlight[] = seasonPromotions
+    .map(tr => {
+      const club = tr.toClubId ? clubsById.get(tr.toClubId) : undefined;
+      if (!club) return null;
+      return {
+        playerId: tr.playerId,
+        playerName: tr.playerName,
+        clubId: club.id,
+        clubName: club.name,
+        clubTier: club.tier,
+        position: tr.position,
+        age: tr.age,
+        overall: tr.overall,
+      };
+    })
+    .filter((item): item is SeasonGraduateHighlight => item !== null)
+    .sort((a, b) => b.overall - a.overall || a.age - b.age)
+    .slice(0, 12);
+
   return {
     seasonYear,
     tier1: tier1Award,
@@ -1228,11 +1459,22 @@ export function calculateSeasonSummary(
     prizeMoney,
     tvRevenue,
     graduatingProspects: playerClub?.academy || [],
+    retirements,
+    totalLeaguePromotions: seasonPromotions.length,
+    topLeagueGraduates,
   };
 }
 
-const EMERGENCY_FIRST_NAMES = ['Liam', 'Oliver', 'Harry', 'Jack', 'George', 'Noah', 'Charlie', 'Jacob', 'Alfie', 'Freddie', 'Oscar', 'Leo', 'Logan', 'Archie', 'Theo'];
-const EMERGENCY_LAST_NAMES = ['Smith', 'Jones', 'Taylor', 'Brown', 'Williams', 'Wilson', 'Johnson', 'Davies', 'Robinson', 'Wright', 'Thompson', 'Evans', 'Walker', 'White', 'Roberts'];
+const EMERGENCY_FIRST_NAMES = [
+  'Liam', 'Oliver', 'Harry', 'Jack', 'George', 'Noah', 'Charlie', 'Jacob', 'Alfie', 'Freddie',
+  'Oscar', 'Leo', 'Logan', 'Archie', 'Theo', 'Callum', 'Declan', 'Ethan', 'Hugo', 'Lucas',
+  'Matteo', 'Julian', 'Rafael', 'Kieran', 'Sander', 'Tomas', 'Nathan', 'Gabriel', 'Henrik', 'Milo'
+];
+const EMERGENCY_LAST_NAMES = [
+  'Smith', 'Jones', 'Taylor', 'Brown', 'Williams', 'Wilson', 'Johnson', 'Davies', 'Robinson', 'Wright',
+  'Thompson', 'Evans', 'Walker', 'White', 'Roberts', 'Bennett', 'Harrison', 'Fraser', 'Moreau', 'Costa',
+  'Lindqvist', 'Navarro', 'Keller', 'Okafor', 'Murphy', 'Byrne', 'McAllister', 'Richter', 'Ferreira', 'Bauer'
+];
 const ROLES_BY_POS: Record<PlayerPosition, string[]> = {
   GK: ['Sweeper Keeper', 'Shot Stopper', 'Commanding Goalkeeper'],
   DEF: ['Ball-Playing Defender', 'Stopper CB', 'No-Nonsense CB', 'Inverted Fullback', 'Wingback'],
@@ -1240,54 +1482,78 @@ const ROLES_BY_POS: Record<PlayerPosition, string[]> = {
   FWD: ['Target Man', 'Pressing Forward', 'Clinical Poacher', 'Inside Forward', 'Pacy Finisher'],
 };
 
+function pickUniqueName(usedNames?: Set<string>, firstPool = YOUTH_FIRST_NAMES, lastPool = YOUTH_LAST_NAMES): string {
+  for (let attempts = 0; attempts < 250; attempts++) {
+    const rf = firstPool[Math.floor(Math.random() * firstPool.length)];
+    const rl = lastPool[Math.floor(Math.random() * lastPool.length)];
+    const cand = `${rf} ${rl}`;
+    if (!usedNames || !usedNames.has(cand)) {
+      usedNames?.add(cand);
+      return cand;
+    }
+  }
+  const fallback = `${firstPool[Math.floor(Math.random() * firstPool.length)]} ${lastPool[Math.floor(Math.random() * lastPool.length)]}-${Math.floor(Math.random() * 90) + 10}`;
+  usedNames?.add(fallback);
+  return fallback;
+}
+
+function pickProspectNationality(tier: LeagueTier): string {
+  const roll = Math.random();
+  if (tier === 1) {
+    if (roll < 0.48) return 'England';
+    if (roll < 0.56) return 'Scotland';
+    if (roll < 0.62) return 'Wales';
+    if (roll < 0.66) return 'Ireland';
+    const intl = ['France', 'Spain', 'Brazil', 'Portugal', 'Netherlands', 'Germany', 'Argentina', 'Norway', 'Belgium', 'Nigeria', 'Japan', 'Denmark'];
+    return intl[Math.floor(Math.random() * intl.length)];
+  }
+  if (tier === 2) {
+    if (roll < 0.60) return 'England';
+    if (roll < 0.70) return 'Scotland';
+    if (roll < 0.78) return 'Wales';
+    if (roll < 0.85) return 'Ireland';
+    if (roll < 0.89) return 'Northern Ireland';
+    const intl = ['France', 'Netherlands', 'Sweden', 'Norway', 'Portugal', 'Nigeria', 'Ghana'];
+    return intl[Math.floor(Math.random() * intl.length)];
+  }
+  if (roll < 0.68) return 'England';
+  if (roll < 0.78) return 'Scotland';
+  if (roll < 0.86) return 'Wales';
+  if (roll < 0.93) return 'Ireland';
+  return 'Northern Ireland';
+}
+
 function generateEmergencyFillerPlayer(
   club: Club,
   pos: PlayerPosition,
   usedNames: Set<string>
 ): Player {
-  let name = '';
-  let attempts = 0;
-  while (attempts < 200) {
-    const rf = EMERGENCY_FIRST_NAMES[Math.floor(Math.random() * EMERGENCY_FIRST_NAMES.length)];
-    const rl = EMERGENCY_LAST_NAMES[Math.floor(Math.random() * EMERGENCY_LAST_NAMES.length)];
-    const cand = `${rf} ${rl}`;
-    if (!usedNames.has(cand)) {
-      name = cand;
-      usedNames.add(cand);
-      break;
-    }
-    attempts++;
-  }
-  if (!name) {
-    name = `${EMERGENCY_FIRST_NAMES[Math.floor(Math.random() * EMERGENCY_FIRST_NAMES.length)]} ${EMERGENCY_LAST_NAMES[Math.floor(Math.random() * EMERGENCY_LAST_NAMES.length)]} Jr`;
-    usedNames.add(name);
-  }
-
-  const baseOvr = club.tier === 1 ? 74 : club.tier === 2 ? 68 : 62;
-  const age = 19 + Math.floor(Math.random() * 5);
-  const ovr = Math.max(50, Math.min(85, baseOvr - 2 + Math.floor(Math.random() * 5)));
+  const name = pickUniqueName(usedNames, YOUTH_FIRST_NAMES, YOUTH_LAST_NAMES);
+  const baseOvr = club.tier === 1 ? 70 : club.tier === 2 ? 64 : 58;
+  const age = 18 + Math.floor(Math.random() * 3); // 18-20 recent graduate
+  const ovr = Math.max(50, Math.min(80, baseOvr - 2 + Math.floor(Math.random() * 5)));
   const roleList = ROLES_BY_POS[pos];
   const role = roleList[Math.floor(Math.random() * roleList.length)];
   const valMultiplier = club.tier === 1 ? 800000 : club.tier === 2 ? 200000 : 50000;
-  const val = Math.round(ovr * ovr * valMultiplier * 0.003);
-  const wageMultiplier = club.tier === 1 ? 1000 : club.tier === 2 ? 300 : 90;
+  const val = Math.max(75000, Math.round(ovr * ovr * valMultiplier * 0.003));
+  const wageMultiplier = club.tier === 1 ? 700 : club.tier === 2 ? 240 : 80;
   const wage = Math.round(ovr * wageMultiplier);
 
   return {
-    id: `p_${club.id}_emg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    id: `p_${club.id}_grad_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
     name,
-    nationality: 'England',
+    nationality: pickProspectNationality(club.tier),
     age,
     position: pos,
     roleDetail: role,
     overall: ovr,
-    growthMomentum: 'steady',
+    growthMomentum: 'rapid',
     value: val,
     wage,
-    contractYears: 2,
+    contractYears: 3,
     form: 6.8,
-    happiness: 75,
-    morale: 'content',
+    happiness: 80,
+    morale: 'happy',
     goals: 0,
     assists: 0,
     appearances: 0,
@@ -1299,6 +1565,7 @@ function generateEmergencyFillerPlayer(
 }
 
 // Helper to replenish AI club squads up to minimum roster requirements
+// Prioritizes promoting from the club's own Youth Academy first, then free agents, then graduate fallback
 export function replenishAISquad(
   club: Club,
   freeAgentsPool: Player[],
@@ -1331,7 +1598,20 @@ export function replenishAISquad(
     const currentWages = club.squad.reduce((sum, p) => sum + p.wage, 0);
     const wageHeadroom = Math.max(6000, club.wageBudget - currentWages);
 
-    // Try finding best free agent for this position within wage budget
+    // 1. Prioritize promoting an aged 17-18 prospect from the club's own Youth Academy
+    const academyMatches = (club.academy || [])
+      .filter(a => a.age >= 17 && a.position === pos)
+      .sort((a, b) => b.overall - a.overall);
+    if (academyMatches.length > 0) {
+      const chosen = academyMatches[0];
+      const promoWage = getAcademyPromotionWage(club.tier);
+      const promoted = buildPromotedPlayerFromProspect(chosen, club, promoWage, 3);
+      club.squad.push(promoted);
+      club.academy = (club.academy || []).filter(a => a.id !== chosen.id);
+      continue;
+    }
+
+    // 2. Next try finding best free agent for this position within wage budget
     const eligible = freeAgentsPool
       .map((fa, idx) => ({ fa, idx }))
       .filter(item => item.fa.position === pos && item.fa.wage <= wageHeadroom)
@@ -1350,13 +1630,102 @@ export function replenishAISquad(
       signedPlayer.cleanSheets = 0;
       signedPlayer.isInjured = false;
       signedPlayer.injuryWeeks = 0;
+      signedPlayer.retiringAtSeasonEnd = false;
       club.squad.push(signedPlayer);
     } else {
-      // Generate emergency youth filler player
+      // 3. Last resort: graduate an unlisted youth squad member
       const filler = generateEmergencyFillerPlayer(club, pos, usedNames);
       club.squad.push(filler);
     }
   }
+}
+
+// Weighted player retirement probability curve (ages 33-42; goalkeepers play longer)
+export function getRetirementProbability(player: Player): number {
+  if (player.age < 33) return 0;
+  if (player.age >= 42 || player.retiringAtSeasonEnd) return 1;
+
+  const index = Math.min(8, Math.max(0, player.age - 33));
+  const outfieldCurve = [0.045, 0.09, 0.16, 0.25, 0.37, 0.51, 0.67, 0.81, 0.93];
+  const gkCurve = [0.008, 0.016, 0.032, 0.065, 0.12, 0.21, 0.35, 0.55, 0.78];
+
+  let prob = player.position === 'GK' ? gkCurve[index] : outfieldCurve[index];
+
+  const modAgeThreshold = player.position === 'GK' ? 36 : 34;
+  if (player.clubId === null && player.age >= modAgeThreshold) {
+    prob += 0.12;
+  }
+  if (player.overall < 63 && player.age >= modAgeThreshold) {
+    prob += 0.08;
+  } else if (player.overall >= 82 && player.age <= 38) {
+    prob *= 0.65;
+  }
+
+  return Math.max(0, Math.min(1, prob));
+}
+
+export function shouldPlayerRetire(player: Player): boolean {
+  if (player.age < 33) return false;
+  if (player.age >= 42 || player.retiringAtSeasonEnd) return true;
+  return Math.random() < getRetirementProbability(player);
+}
+
+export function determineSeasonRetirements(
+  clubs: Club[],
+  freeAgents: Player[] = [],
+  userClubId: string | null = null
+): RetirementRecord[] {
+  const retirements: RetirementRecord[] = [];
+
+  clubs.forEach(club => {
+    club.squad.forEach(p => {
+      if (shouldPlayerRetire(p)) {
+        retirements.push({
+          playerId: p.id,
+          name: p.name,
+          nationality: p.nationality,
+          age: p.age,
+          position: p.position,
+          overall: p.overall,
+          clubId: club.id,
+          clubName: club.name,
+          clubShortName: club.shortName,
+          clubTier: club.tier,
+          appearances: p.appearances,
+          goals: p.goals,
+          assists: p.assists,
+          cleanSheets: p.cleanSheets,
+          isUserClub: Boolean(userClubId && club.id === userClubId),
+        });
+      }
+    });
+  });
+
+  freeAgents.forEach(fa => {
+    if (shouldPlayerRetire(fa)) {
+      retirements.push({
+        playerId: fa.id,
+        name: fa.name,
+        nationality: fa.nationality,
+        age: fa.age,
+        position: fa.position,
+        overall: fa.overall,
+        clubId: null,
+        clubName: 'Free Agent',
+        appearances: fa.appearances,
+        goals: fa.goals,
+        assists: fa.assists,
+        cleanSheets: fa.cleanSheets,
+        isUserClub: false,
+      });
+    }
+  });
+
+  return retirements.sort((a, b) => {
+    if (a.isUserClub !== b.isUserClub) return a.isUserClub ? -1 : 1;
+    if (b.overall !== a.overall) return b.overall - a.overall;
+    return b.age - a.age;
+  });
 }
 
 // Transition to next season (Infinite Multi-Season Loop)
@@ -1366,7 +1735,9 @@ export function advanceToNextSeason(
   owners: Owner[],
   managers: Manager[],
   freeAgents: Player[],
-  director: Director
+  director: Director,
+  delegation?: DelegationMatrix,
+  transferHistory: TransferRecord[] = []
 ): {
   newClubs: Club[];
   newOwners: Owner[];
@@ -1374,7 +1745,9 @@ export function advanceToNextSeason(
   newFreeAgents: Player[];
   newDirector: Director;
   newSeasonYear: number;
+  newTransfers: TransferRecord[];
 } {
+  const seasonTransitionTransfers: TransferRecord[] = [];
   const updatedClubs = clubs.map(c => ({
     ...c,
     squad: c.squad.map(p => ({ ...p })),
@@ -1390,38 +1763,59 @@ export function advanceToNextSeason(
   }));
   const updatedFreeAgents = freeAgents.map(p => ({ ...p }));
 
-  // Collect all currently used names to avoid duplicate filler names
+  // Build deterministic retirement lookup from SeasonSummary (falling back to live weighted roll if absent)
+  const hasSummaryRetirements = Array.isArray(summary.retirements);
+  const retiringPlayerIds = new Set((summary.retirements || []).map(r => r.playerId));
+
+  // Collect all currently used names to avoid duplicate generated names
   const usedNames = new Set<string>();
-  updatedClubs.forEach(c => c.squad.forEach(p => usedNames.add(p.name)));
+  updatedClubs.forEach(c => {
+    c.squad.forEach(p => usedNames.add(p.name));
+    (c.academy || []).forEach(a => usedNames.add(a.name));
+  });
   updatedFreeAgents.forEach(fa => usedNames.add(fa.name));
   managers.forEach(m => usedNames.add(m.name));
 
+  // Compute finishing table rank & merit prize money before resetting tables and applying tier moves
+  const finishingPrizeByClubId = new Map<string, number>();
+  ([1, 2, 3] as LeagueTier[]).forEach(tier => {
+    const ranked = updatedClubs
+      .filter(c => c.tier === tier)
+      .sort((a, b) => b.points - a.points || b.goalDifference - a.goalDifference || b.goalsFor - a.goalsFor);
+    ranked.forEach((c, idx) => {
+      const pos = idx + 1;
+      const prize =
+        tier === 1
+          ? Math.max(10000000, 45000000 - (pos - 1) * 1800000)
+          : tier === 2
+          ? Math.max(3000000, 16000000 - (pos - 1) * 600000)
+          : Math.max(800000, 5000000 - (pos - 1) * 180000);
+      finishingPrizeByClubId.set(c.id, prize);
+    });
+  });
+
   // 1. Process Promotions and Relegations across tiers
-  // Relegate PL bottom 3 to Championship (tier 2)
   summary.tier1.relegatedClubs.forEach(rel => {
     const club = updatedClubs.find(c => c.id === rel.id);
     if (club) club.tier = 2;
   });
 
-  // Promote Championship top 3 to Premier League (tier 1)
   summary.tier2.promotedClubs.forEach(prom => {
     const club = updatedClubs.find(c => c.id === prom.id);
     if (club) club.tier = 1;
   });
 
-  // Relegate Championship bottom 3 to League One (tier 3)
   summary.tier2.relegatedClubs.forEach(rel => {
     const club = updatedClubs.find(c => c.id === rel.id);
     if (club) club.tier = 3;
   });
 
-  // Promote League One top 3 to Championship (tier 2)
   summary.tier3.promotedClubs.forEach(prom => {
     const club = updatedClubs.find(c => c.id === prom.id);
     if (club) club.tier = 2;
   });
 
-  // 2. Reset club tables, award TV money and seasonal prize budgets
+  // 2. Reset club tables, award TV money, process retirements, aging & youth intake
   updatedClubs.forEach(club => {
     const isUserClub = Boolean(director.currentClubId && club.id === director.currentClubId);
 
@@ -1435,16 +1829,26 @@ export function advanceToNextSeason(
     club.points = 0;
     club.form = [];
 
-    // Financial injection for new season
-    const tvCash = club.tier === 1 ? 85000000 : club.tier === 2 ? 16000000 : 3500000;
-    club.balance += tvCash;
-    club.transferBudget += Math.round(tvCash * 0.45);
+    // Financial injection for new season (TV rights + earned merit prize money)
+    const tvCash = club.tier === 1 ? 88000000 : club.tier === 2 ? 18000000 : 4000000;
+    const meritPrize = isUserClub ? summary.prizeMoney : (finishingPrizeByClubId.get(club.id) ?? 0);
+    const totalPayout = tvCash + meritPrize;
+    club.balance += totalPayout;
+    club.transferBudget += Math.round(totalPayout * 0.45);
 
-    // 3. Player annual aging & development
-    const keptSquad: Player[] = [];
+    // 3. Retirements + annual aging & development
+    const agedNonRetiringSquad: Player[] = [];
     club.squad.forEach(p => {
+      const retires = hasSummaryRetirements
+        ? retiringPlayerIds.has(p.id) || p.age >= 42
+        : shouldPlayerRetire(p);
+      if (retires) {
+        return; // Player retires from football
+      }
+
       const agedPlayer = { ...p };
       agedPlayer.age += 1;
+      agedPlayer.retiringAtSeasonEnd = false;
       agedPlayer.contractYears = Math.max(0, agedPlayer.contractYears - 1);
       agedPlayer.goals = 0;
       agedPlayer.assists = 0;
@@ -1459,7 +1863,6 @@ export function advanceToNextSeason(
         agedPlayer.overall = Math.min(99, agedPlayer.overall + gain);
         agedPlayer.value = Math.round(agedPlayer.value * 1.25);
       } else if (agedPlayer.age <= 29 && agedPlayer.overall < 99 && Math.random() < 0.45) {
-        // Prime age players can still scale to 99
         agedPlayer.overall = Math.min(99, agedPlayer.overall + 1);
         agedPlayer.value = Math.round(agedPlayer.value * 1.15);
       } else if (agedPlayer.age >= 32 && Math.random() < 0.5) {
@@ -1467,26 +1870,49 @@ export function advanceToNextSeason(
         agedPlayer.value = Math.round(agedPlayer.value * 0.8);
       }
       agedPlayer.growthMomentum = computeGrowthMomentum(agedPlayer);
+      agedNonRetiringSquad.push(agedPlayer);
+    });
 
-      // Expired contracts handling
+    // If Coach-led renewals are active for user's club, give the Head Coach a final pass on expiring contracts before free-agency release
+    let postRenewalSquad = agedNonRetiringSquad;
+    if (isUserClub && delegation?.contractRenewals === 'manager') {
+      const clubManager = club.managerId ? managers.find(m => m.id === club.managerId) : undefined;
+      const renewalPass = runManagerContractRenewals({
+        myClubId: club.id,
+        club: { ...club, squad: agedNonRetiringSquad },
+        manager: clubManager,
+        currentWeek: 46,
+        seasonYear: summary.seasonYear,
+        delegation,
+        transferHistory,
+        isSeasonEndPass: true,
+      });
+      postRenewalSquad = renewalPass.updatedClub.squad;
+      if (renewalPass.newTransfers.length > 0) {
+        seasonTransitionTransfers.push(...renewalPass.newTransfers);
+      }
+    }
+
+    // Expired contracts handling
+    const keptSquad: Player[] = [];
+    postRenewalSquad.forEach(agedPlayer => {
       if (agedPlayer.contractYears === 0) {
         if (!isUserClub) {
-          // AI clubs re-sign expiring players with ~65% chance (higher if >=80 OVR, lower if unhappy)
           let reSignChance = 0.65;
           if (agedPlayer.overall >= 80) reSignChance += 0.20;
           else if (agedPlayer.overall >= 75) reSignChance += 0.10;
           if (agedPlayer.happiness < 60) reSignChance -= 0.25;
           if (agedPlayer.happiness < 45) reSignChance -= 0.20;
+          if (agedPlayer.age >= 35) reSignChance -= 0.15;
 
           if (Math.random() < reSignChance) {
-            agedPlayer.contractYears = Math.floor(Math.random() * 3) + 2; // 2 to 4 years
+            agedPlayer.contractYears = Math.floor(Math.random() * 3) + 2;
             keptSquad.push(agedPlayer);
           } else {
             agedPlayer.clubId = null;
             updatedFreeAgents.push(agedPlayer);
           }
         } else {
-          // User manages their own club contracts
           agedPlayer.clubId = null;
           updatedFreeAgents.push(agedPlayer);
         }
@@ -1497,8 +1923,26 @@ export function advanceToNextSeason(
 
     club.squad = keptSquad;
 
-    // Refill AI clubs to minimum squad shape (2 GK, 6 DEF, 6 MID, 4 FWD, 20-25 players)
+    // Refill AI clubs to minimum squad shape (promoting from their own Youth Academy first)
     if (!isUserClub) {
+      // Also allow AI clubs to proactively promote standout 17-18yo prospects into open spots
+      const openSlots = Math.max(0, 24 - club.squad.length);
+      if (openSlots > 0 && (club.academy?.length || 0) > 0) {
+        const promoThreshold = club.tier === 1 ? 61 : club.tier === 2 ? 56 : 52;
+        const standouts = (club.academy || [])
+          .filter(a => a.age >= 17 && (a.overall >= promoThreshold || a.momentumTier === 'Generational Prodigy'))
+          .sort((a, b) => b.overall - a.overall)
+          .slice(0, Math.min(2, openSlots));
+        standouts.forEach(prospect => {
+          const promoWage = getAcademyPromotionWage(club.tier);
+          const currentWages = club.squad.reduce((sum, pl) => sum + pl.wage, 0);
+          if (club.squad.length < 25 && currentWages + promoWage <= club.wageBudget * 1.05) {
+            club.squad.push(buildPromotedPlayerFromProspect(prospect, club, promoWage, 3));
+            club.academy = (club.academy || []).filter(a => a.id !== prospect.id);
+          }
+        });
+      }
+
       replenishAISquad(club, updatedFreeAgents, usedNames);
       club.lineup = undefined;
     } else if (club.lineup) {
@@ -1511,7 +1955,6 @@ export function advanceToNextSeason(
     const retainedAcademy: AcademyPlayer[] = [];
     existingAcademy.forEach(p => {
       const nextAge = p.age + 1;
-      // Prospects aged 19 leave the youth setup if unpromoted
       if (nextAge <= 18) {
         const momentumGain = p.momentumTier === 'Generational Prodigy' ? 4 :
                              p.momentumTier === 'High Tempo' ? 3 :
@@ -1522,22 +1965,64 @@ export function advanceToNextSeason(
           age: nextAge,
           overall: Math.min(99, p.overall + ovrGain),
         });
+      } else if (p.overall >= 56 && updatedFreeAgents.length < 130) {
+        // Release viable 19yo unpromoted academy graduates into free agency so talent circulates
+        const baseWage = getAcademyPromotionWage(club.tier);
+        const valMultiplier = club.tier === 1 ? 750000 : club.tier === 2 ? 200000 : 55000;
+        updatedFreeAgents.push({
+          id: `p_fa_acad_${p.id}`,
+          name: p.name,
+          nationality: p.nationality,
+          age: 19,
+          position: p.position,
+          roleDetail: p.roleDetail,
+          overall: p.overall,
+          growthMomentum: p.momentumTier === 'Generational Prodigy' ? 'breakout' : p.momentumTier === 'High Tempo' ? 'rapid' : 'steady',
+          value: Math.max(45000, Math.round(p.overall * p.overall * valMultiplier * 0.0025)),
+          wage: Math.max(800, Math.round(baseWage * 0.75)),
+          contractYears: 0,
+          form: 6.5,
+          happiness: 72,
+          morale: 'content',
+          goals: 0,
+          assists: 0,
+          appearances: 0,
+          cleanSheets: 0,
+          clubId: null,
+        });
       }
     });
 
-    // Ingest new youth cohort (3 to 5 young prospects)
-    const freshIntake = generateYouthIntake(club, summary.seasonYear + 1, Math.max(3, 6 - retainedAcademy.length));
+    // Ingest new youth cohort (3 to 5 young prospects, ensuring 5-7 active prospects at every club)
+    const targetCount = Math.max(3, 6 - retainedAcademy.length);
+    const freshIntake = generateYouthIntake(club, summary.seasonYear + 1, targetCount, usedNames);
     club.academy = [...retainedAcademy, ...freshIntake];
   });
 
-  // Clean the free agent pool each season: retire players aged 37+ with overall < 70, and drop anyone under 52 OVR
-  const cleanedFreeAgents = updatedFreeAgents.filter(fa => {
-    if (fa.age >= 37 && fa.overall < 70) return false;
-    if (fa.overall < 52) return false;
-    return true;
-  });
+  // Clean the free agent pool each season: apply retirements (33-42), drop players under 54 OVR, and keep top 140
+  const cleanedFreeAgents = updatedFreeAgents
+    .filter(fa => {
+      const retires = hasSummaryRetirements
+        ? retiringPlayerIds.has(fa.id) || fa.age >= 42
+        : shouldPlayerRetire(fa);
+      if (retires) return false;
+      if (fa.overall < 54) return false;
+      if (fa.age >= 31 && fa.overall < 64) return false;
+      return true;
+    })
+    .sort((a, b) => b.overall - a.overall || a.age - b.age)
+    .slice(0, 140)
+    .map(fa => ({
+      ...fa,
+      age: fa.age + 1,
+      retiringAtSeasonEnd: false,
+      goals: 0,
+      assists: 0,
+      appearances: 0,
+      cleanSheets: 0,
+    }));
 
-  // 5. Age Managers & Free Agents
+  // 5. Age Managers
   const updatedManagers = managers.map(m => ({
     ...m,
     age: m.age + 1,
@@ -1569,6 +2054,7 @@ export function advanceToNextSeason(
     newFreeAgents: cleanedFreeAgents,
     newDirector,
     newSeasonYear: summary.seasonYear + 1,
+    newTransfers: seasonTransitionTransfers,
   };
 }
 
@@ -1578,14 +2064,22 @@ const YOUTH_FIRST_NAMES = [
   'Leo', 'Harvey', 'Finley', 'Archie', 'Albie', 'Mason', 'Luca', 'Jude', 'Cole', 'Kobbie',
   'Rico', 'Lewis', 'Ethan', 'Bobby', 'Teddy', 'Isaac', 'Caleb', 'Liam', 'Zack', 'Mateo',
   'Kobe', 'Enzo', 'Kai', 'Felix', 'Jayden', 'Myles', 'Tyler', 'Dexter', 'Rowan', 'Brody',
-  'Noah', 'Arthur', 'Oscar', 'Theo', 'Freddie', 'Ronnie', 'Elliott', 'Harrison', 'Ruben'
+  'Noah', 'Arthur', 'Oscar', 'Theo', 'Freddie', 'Ronnie', 'Elliott', 'Harrison', 'Ruben',
+  'Callum', 'Declan', 'Sander', 'Matteo', 'Julian', 'Rafael', 'Kieran', 'Hugo', 'Lucas',
+  'Seb', 'Toby', 'Max', 'Aiden', 'Dylan', 'Owen', 'Reece', 'Sam', 'Connor', 'Jamie',
+  'Nolan', 'Ewan', 'Ciaran', 'Thiago', 'Soren', 'Bastian', 'Emil', 'Ibrahim', 'Malik', 'Tariq',
+  'Kaito', 'Luka', 'Dario', 'Nico', 'Gavin', 'Callum', 'Bryn', 'Finn', 'Louie', 'Sonny'
 ];
 
 const YOUTH_LAST_NAMES = [
   'Palmer', 'Mainoo', 'Lewis', 'Wharton', 'Bellingham', 'Gray', 'Miley', 'Colwill', 'Quansah', 'Gittens',
   'Hall', 'Anderson', 'Sterling', 'Chambers', 'Davenport', 'Gallagher', 'Carrington', 'Sinclair', 'Beckett', 'Vance',
-  'Mercer', 'Keane', 'Brennan', 'Lockwood', 'Kavanagh', 'Huxley', 'Fairchild', 'Redmond', 'Sinclair', 'Thorne',
-  'Winter', 'Ashford', 'Cross', 'Barrett', 'Harrington', 'Fletcher', 'Rowe', 'Preston', 'Somerset'
+  'Mercer', 'Keane', 'Brennan', 'Lockwood', 'Kavanagh', 'Huxley', 'Fairchild', 'Redmond', 'Thorne', 'Winter',
+  'Ashford', 'Cross', 'Barrett', 'Harrington', 'Fletcher', 'Rowe', 'Preston', 'Somerset', 'Bennett', 'Fraser',
+  'Moreau', 'Costa', 'Lindqvist', 'Navarro', 'Keller', 'Okafor', 'Murphy', 'Byrne', 'McAllister', 'Richter',
+  'Ferreira', 'Bauer', 'Henderson', 'Pearson', 'Gillespie', 'Doyle', 'Nolan', 'Patel', 'Okonkwo', 'Diallo',
+  'Delgado', 'Svensson', 'Bakker', 'Hansen', 'Kowalski', 'Novak', 'Almeida', 'Bianchi', 'Whitaker', 'Caldwell',
+  'Galloway', 'Sutton', 'Langford', 'Beaumont', 'Walsh', 'Fitzgerald', 'Donnelly', 'Campbell', 'Stewart', 'Reid'
 ];
 
 const PROSPECT_TRAITS: ProspectTrait[] = [
@@ -1636,22 +2130,28 @@ const SCOUT_NOTES: Record<ProspectTrait, string[]> = {
   ],
 };
 
-export function generateYouthIntake(club: Club, seasonYear: number, count = 5): AcademyPlayer[] {
+export function generateYouthIntake(
+  club: Club,
+  seasonYear: number,
+  count = 5,
+  usedNames?: Set<string>
+): AcademyPlayer[] {
   const prospects: AcademyPlayer[] = [];
   const positions: PlayerPosition[] = ['GK', 'DEF', 'DEF', 'MID', 'MID', 'FWD'];
 
   for (let i = 0; i < count; i++) {
     const pos = positions[i % positions.length];
-    const fName = YOUTH_FIRST_NAMES[Math.floor(Math.random() * YOUTH_FIRST_NAMES.length)];
-    const lName = YOUTH_LAST_NAMES[Math.floor(Math.random() * YOUTH_LAST_NAMES.length)];
+    const name = pickUniqueName(usedNames, YOUTH_FIRST_NAMES, YOUTH_LAST_NAMES);
     const age = 15 + Math.floor(Math.random() * 4); // 15 to 18
     const trait = PROSPECT_TRAITS[Math.floor(Math.random() * PROSPECT_TRAITS.length)];
     const roleList = YOUTH_ROLES[pos];
     const roleDetail = roleList[Math.floor(Math.random() * roleList.length)];
 
-    // Overall baseline influenced by club tier
-    const baseOvr = club.tier === 1 ? 55 : club.tier === 2 ? 50 : 46;
-    const overall = Math.max(45, Math.min(68, baseOvr + Math.floor(Math.random() * 9) - 3));
+    // Overall baseline influenced by club tier and prestige
+    const prestigeMod = club.prestige >= 82 ? 2 : club.prestige <= 55 ? -1 : 0;
+    const baseOvr = (club.tier === 1 ? 56 : club.tier === 2 ? 51 : 47) + prestigeMod;
+    const traitBoost = trait === 'Generational Prodigy' ? 4 : 0;
+    const overall = Math.max(45, Math.min(71, baseOvr + traitBoost + Math.floor(Math.random() * 9) - 3));
 
     // Determine growth momentum tier (replaces pre-determined potential caps)
     let momentumTier: MomentumTier = 'Steady Climber';
@@ -1671,8 +2171,8 @@ export function generateYouthIntake(club: Club, seasonYear: number, count = 5): 
 
     prospects.push({
       id: `acad_${club.id}_${seasonYear}_${i}_${Math.random().toString(36).substring(2, 7)}`,
-      name: `${fName} ${lName}`,
-      nationality: Math.random() > 0.35 ? 'England' : Math.random() > 0.5 ? 'Scotland' : Math.random() > 0.5 ? 'Wales' : 'Northern Ireland',
+      name,
+      nationality: pickProspectNationality(club.tier),
       age,
       position: pos,
       roleDetail,
@@ -1681,10 +2181,832 @@ export function generateYouthIntake(club: Club, seasonYear: number, count = 5): 
       trait,
       scoutReport,
       graduatingSeason: seasonYear,
+      clubId: club.id,
     });
   }
 
   return prospects;
+}
+
+function buildPromotedPlayerFromProspect(
+  prospect: AcademyPlayer,
+  club: Club,
+  wage: number,
+  contractYears: number
+): Player {
+  const valMultiplier = club.tier === 1 ? 800000 : club.tier === 2 ? 220000 : 60000;
+  const value = Math.max(50000, Math.round(prospect.overall * prospect.overall * valMultiplier * 0.003));
+
+  const startingMomentum: GrowthMomentum =
+    prospect.momentumTier === 'Generational Prodigy' ? 'breakout' :
+    prospect.momentumTier === 'High Tempo' ? 'rapid' : 'steady';
+
+  return {
+    id: `p_promoted_${prospect.id}_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
+    name: prospect.name,
+    nationality: prospect.nationality,
+    age: prospect.age,
+    position: prospect.position,
+    roleDetail: prospect.roleDetail,
+    overall: prospect.overall,
+    growthMomentum: startingMomentum,
+    value,
+    wage,
+    contractYears,
+    form: 6.8,
+    happiness: 95,
+    morale: 'ecstatic',
+    goals: 0,
+    assists: 0,
+    appearances: 0,
+    cleanSheets: 0,
+    clubId: club.id,
+  };
+}
+
+function processWeeklyRetirementNotices(
+  currentWeek: number,
+  clubsMap: Map<string, Club>,
+  directorClubId: string | null
+): { wireEvents: AcademyWireEvent[]; pressHeadlines: PressHeadline[] } {
+  const wireEvents: AcademyWireEvent[] = [];
+  const pressHeadlines: PressHeadline[] = [];
+
+  if (currentWeek < 24 || currentWeek > 45) {
+    return { wireEvents, pressHeadlines };
+  }
+
+  clubsMap.forEach(club => {
+    const isUserClub = Boolean(directorClubId && club.id === directorClubId);
+    club.squad.forEach(p => {
+      if (p.age < 33 || p.retiringAtSeasonEnd) return;
+
+      const baseProb = getRetirementProbability(p);
+      // Higher-age players have a higher chance of announcing their farewell season in spring
+      const weeklyNoticeChance = p.age >= 42 && currentWeek >= 36 ? 0.35 : baseProb * 0.032;
+
+      if (Math.random() < weeklyNoticeChance) {
+        p.retiringAtSeasonEnd = true;
+
+        if (isUserClub || (p.overall >= 76 && wireEvents.length < 2)) {
+          wireEvents.push({
+            id: `wire_ret_${p.id}_w${currentWeek}`,
+            kind: 'retirement_notice',
+            playerName: p.name,
+            position: p.position,
+            age: p.age,
+            overall: p.overall,
+            clubName: club.name,
+            detail: `Confirmed he will retire at the end of the season`,
+          });
+        }
+
+        if (isUserClub) {
+          pressHeadlines.push({
+            title: `Veteran ${p.name} (${p.age}) announces he will retire from football at season's end`,
+            source: 'The Sunday Athletic',
+            category: 'boardroom',
+            sentiment: 'neutral',
+          });
+        }
+      }
+    });
+  });
+
+  return { wireEvents, pressHeadlines };
+}
+
+function runAIAcademyPromotionsForWeek({
+  currentWeek,
+  seasonYear,
+  clubsMap,
+  directorClubId,
+  transferHistory,
+}: {
+  currentWeek: number;
+  seasonYear: number;
+  clubsMap: Map<string, Club>;
+  directorClubId: string | null;
+  transferHistory: TransferRecord[];
+}): { newTransfers: TransferRecord[]; wireEvents: AcademyWireEvent[] } {
+  const newTransfers: TransferRecord[] = [];
+  const wireEvents: AcademyWireEvent[] = [];
+
+  const isActivePromoWindow =
+    currentWeek === 1 ||
+    (currentWeek >= 2 && currentWeek <= 6) ||
+    (currentWeek >= 20 && currentWeek <= 24) ||
+    currentWeek >= 45;
+
+  clubsMap.forEach((club, clubId) => {
+    if (clubId === directorClubId) return;
+    if (club.squad.length >= 25) return;
+    const academy = club.academy || [];
+    if (academy.length === 0) return;
+
+    const seasonPromos = transferHistory.filter(
+      tr => tr.season === seasonYear && tr.toClubId === clubId && tr.type === 'promotion'
+    ).length;
+    if (seasonPromos >= 3) return;
+
+    const healthyCounts: Record<PlayerPosition, number> = {
+      GK: club.squad.filter(p => !p.isInjured && p.position === 'GK').length,
+      DEF: club.squad.filter(p => !p.isInjured && p.position === 'DEF').length,
+      MID: club.squad.filter(p => !p.isInjured && p.position === 'MID').length,
+      FWD: club.squad.filter(p => !p.isInjured && p.position === 'FWD').length,
+    };
+
+    const needsDepth =
+      club.squad.length < 21 ||
+      healthyCounts.GK < 2 ||
+      healthyCounts.DEF < 6 ||
+      healthyCounts.MID < 6 ||
+      healthyCounts.FWD < 4;
+
+    if (!isActivePromoWindow && !(needsDepth && Math.random() < 0.25)) {
+      return;
+    }
+    if (!needsDepth && Math.random() > 0.14) {
+      return;
+    }
+
+    const tierThreshold = club.tier === 1 ? 61 : club.tier === 2 ? 56 : 52;
+    const candidates = academy
+      .filter(p => {
+        if (p.age < 17) return false;
+        const posNeed = healthyCounts[p.position] < MIN_YOUTH_POSITION_DEPTH[p.position];
+        return (
+          posNeed ||
+          club.squad.length < 21 ||
+          p.overall >= tierThreshold ||
+          p.momentumTier === 'Generational Prodigy'
+        );
+      })
+      .sort((a, b) => {
+        const aNeed = healthyCounts[a.position] < MIN_YOUTH_POSITION_DEPTH[a.position] ? 1 : 0;
+        const bNeed = healthyCounts[b.position] < MIN_YOUTH_POSITION_DEPTH[b.position] ? 1 : 0;
+        if (aNeed !== bNeed) return bNeed - aNeed;
+        return b.overall - a.overall;
+      });
+
+    if (candidates.length === 0) return;
+
+    const prospect = candidates[0];
+    const promoWage = getAcademyPromotionWage(club.tier);
+    const currentWages = club.squad.reduce((acc, p) => acc + p.wage, 0);
+    const allowedWage = needsDepth ? club.wageBudget * 1.05 : club.wageBudget;
+    if (currentWages + promoWage > allowedWage) return;
+
+    const result = promoteAcademyPlayer(club, prospect.id, promoWage, 3, undefined, {
+      allowWageBudgetOverageFactor: needsDepth ? 1.05 : 1,
+    });
+    if (!result.success) return;
+
+    clubsMap.set(clubId, result.updatedClub);
+    const tr = createTransferRecord(
+      result.promotedPlayer,
+      'promotion',
+      null,
+      clubId,
+      0,
+      seasonYear,
+      currentWeek,
+      'ai',
+      `Promoted from ${club.name} Youth Academy`
+    );
+    newTransfers.push(tr);
+
+    if (
+      wireEvents.length < 2 &&
+      (prospect.overall >= 60 || prospect.momentumTier === 'Generational Prodigy')
+    ) {
+      wireEvents.push({
+        id: `wire_ai_promo_${tr.id}`,
+        kind: 'promotion',
+        playerName: prospect.name,
+        position: prospect.position,
+        age: prospect.age,
+        overall: prospect.overall,
+        clubName: club.name,
+        detail: `${prospect.momentumTier} graduated to ${club.shortName} first team`,
+      });
+    }
+  });
+
+  return { newTransfers, wireEvents };
+}
+
+export const MAX_USER_ACADEMY_CAPACITY = 12;
+
+export function calculatePoachCompensation(
+  prospect: AcademyPlayer,
+  sellingClub: Club
+): number {
+  const base = Math.pow(Math.max(45, prospect.overall) - 40, 2) * 1800;
+  const momentumMult =
+    prospect.momentumTier === 'Generational Prodigy'
+      ? 2.0
+      : prospect.momentumTier === 'High Tempo'
+        ? 1.4
+        : prospect.momentumTier === 'Late Surge'
+          ? 1.2
+          : 1.0;
+  const tierMult = sellingClub.tier === 1 ? 1.4 : sellingClub.tier === 2 ? 1.0 : 0.65;
+  const ageMult = prospect.age <= 16 ? 1.15 : 1.0;
+
+  const raw = base * momentumMult * tierMult * ageMult;
+  return Math.max(100000, Math.round(raw / 25000) * 25000);
+}
+
+export interface PoachEvaluationResult {
+  ok: boolean;
+  reason?: string;
+  compensationFee: number;
+  minAcceptableFee: number;
+}
+
+export function evaluatePoachProspect({
+  prospect,
+  sellingClub,
+  buyingClub,
+  owner,
+  offeredFee,
+  destination,
+  wage,
+}: {
+  prospect: AcademyPlayer;
+  sellingClub: Club;
+  buyingClub: Club;
+  owner?: Owner;
+  offeredFee: number;
+  destination: 'academy' | 'senior';
+  wage?: number;
+}): PoachEvaluationResult {
+  const compensationFee = calculatePoachCompensation(prospect, sellingClub);
+  const minAcceptableFee = Math.round((compensationFee * 0.9) / 25000) * 25000;
+
+  if ((sellingClub.academy?.length || 0) <= 1) {
+    return {
+      ok: false,
+      reason: `${sellingClub.name} refuse to leave their academy empty.`,
+      compensationFee,
+      minAcceptableFee,
+    };
+  }
+
+  if (destination === 'senior' && prospect.age < 17) {
+    return {
+      ok: false,
+      reason: `${prospect.name} is ${prospect.age} and must enter your Youth Academy until age 17.`,
+      compensationFee,
+      minAcceptableFee,
+    };
+  }
+
+  if (destination === 'academy' && (buyingClub.academy?.length || 0) >= MAX_USER_ACADEMY_CAPACITY) {
+    return {
+      ok: false,
+      reason: `Your Youth Academy is at maximum capacity (${MAX_USER_ACADEMY_CAPACITY} prospects). Promote or release a scholar first.`,
+      compensationFee,
+      minAcceptableFee,
+    };
+  }
+
+  if (destination === 'senior') {
+    if (buyingClub.squad.length >= 25) {
+      return {
+        ok: false,
+        reason: `First-team squad is full at 25 players. Sign ${prospect.name} to your Youth Academy or free a senior slot.`,
+        compensationFee,
+        minAcceptableFee,
+      };
+    }
+    const offeredWage = wage ?? getAcademyPromotionWage(buyingClub.tier);
+    const currentWages = buyingClub.squad.reduce((acc, p) => acc + p.wage, 0);
+    if (currentWages + offeredWage > buyingClub.wageBudget) {
+      return {
+        ok: false,
+        reason: `Offered wage (£${(offeredWage / 1000).toFixed(1)}k/wk) exceeds club weekly wage headroom.`,
+        compensationFee,
+        minAcceptableFee,
+      };
+    }
+  }
+
+  if (offeredFee > buyingClub.transferBudget) {
+    return {
+      ok: false,
+      reason: `Compensation (£${(offeredFee / 1000000).toFixed(2)}M) exceeds your transfer war chest (£${(buyingClub.transferBudget / 1000000).toFixed(2)}M).`,
+      compensationFee,
+      minAcceptableFee,
+    };
+  }
+
+  if (offeredFee > buyingClub.balance) {
+    return {
+      ok: false,
+      reason: `Club cash reserves (£${(buyingClub.balance / 1000000).toFixed(2)}M) cannot cover this compensation fee.`,
+      compensationFee,
+      minAcceptableFee,
+    };
+  }
+
+  if (offeredFee < minAcceptableFee) {
+    return {
+      ok: false,
+      reason: `${sellingClub.name} rejected £${(offeredFee / 1000000).toFixed(2)}M. Youth tribunal valuation requires at least £${(minAcceptableFee / 1000000).toFixed(2)}M.`,
+      compensationFee,
+      minAcceptableFee,
+    };
+  }
+
+  if (owner?.wealth === 'frugal' && offeredFee > buyingClub.transferBudget * 0.6) {
+    return {
+      ok: false,
+      reason: `BOARD VETO: ${owner.name} blocked spending over 60% of the transfer war chest on a single youth compensation fee.`,
+      compensationFee,
+      minAcceptableFee,
+    };
+  }
+
+  return {
+    ok: true,
+    compensationFee,
+    minAcceptableFee,
+  };
+}
+
+export function poachAcademyProspect({
+  prospect,
+  sellingClub,
+  buyingClub,
+  clubs,
+  director,
+  owner,
+  manager,
+  offeredFee,
+  destination,
+  wage,
+  contractYears,
+  seasonYear,
+  currentWeek,
+}: {
+  prospect: AcademyPlayer;
+  sellingClub: Club;
+  buyingClub: Club;
+  clubs: Club[];
+  director: Director;
+  owner?: Owner;
+  manager?: Manager;
+  offeredFee: number;
+  destination: 'academy' | 'senior';
+  wage: number;
+  contractYears: number;
+  seasonYear: number;
+  currentWeek: number;
+}):
+  | {
+      success: true;
+      updatedClubs: Club[];
+      updatedDirector: Director;
+      record: TransferRecord;
+      message: string;
+    }
+  | { success: false; error: string } {
+  const evaluation = evaluatePoachProspect({
+    prospect,
+    sellingClub,
+    buyingClub,
+    owner,
+    offeredFee,
+    destination,
+    wage,
+  });
+
+  if (!evaluation.ok) {
+    return { success: false, error: evaluation.reason || 'Unable to complete youth compensation approach.' };
+  }
+
+  let transferPlayerForRecord: Player;
+  let resultMsg = '';
+
+  const updatedClubs = clubs.map(c => {
+    if (c.id === sellingClub.id) {
+      return {
+        ...c,
+        balance: c.balance + offeredFee,
+        transferBudget: c.transferBudget + offeredFee,
+        academy: (c.academy || []).filter(a => a.id !== prospect.id),
+      };
+    }
+
+    if (c.id === buyingClub.id) {
+      if (destination === 'academy') {
+        const scholar: AcademyPlayer = {
+          ...prospect,
+          clubId: buyingClub.id,
+          graduatingSeason: seasonYear,
+        };
+        transferPlayerForRecord = buildPromotedPlayerFromProspect(scholar, buyingClub, 0, 0);
+        resultMsg = `POACH COMPLETED: ${prospect.name} (${prospect.position}, Age ${prospect.age}) joined ${buyingClub.name} Youth Academy for £${(offeredFee / 1000000).toFixed(2)}M compensation.`;
+        return {
+          ...c,
+          balance: Math.max(0, c.balance - offeredFee),
+          transferBudget: Math.max(0, c.transferBudget - offeredFee),
+          academy: [...(c.academy || []), scholar],
+        };
+      } else {
+        const seniorPlayer = buildPromotedPlayerFromProspect(prospect, buyingClub, wage, contractYears);
+        transferPlayerForRecord = seniorPlayer;
+        resultMsg = `POACH COMPLETED: ${prospect.name} (${prospect.position}, Age ${prospect.age}) signed a ${contractYears}-year senior contract from ${sellingClub.name} Academy for £${(offeredFee / 1000000).toFixed(2)}M compensation.`;
+        const baseUpdated: Club = {
+          ...c,
+          balance: Math.max(0, c.balance - offeredFee),
+          transferBudget: Math.max(0, c.transferBudget - offeredFee),
+          squad: [...c.squad, seniorPlayer],
+        };
+        return baseUpdated.lineup
+          ? { ...baseUpdated, lineup: syncLineupAfterSquadChange(baseUpdated, manager) }
+          : baseUpdated;
+      }
+    }
+
+    return c;
+  });
+
+  // Fallback assignment in case TS control-flow analysis needs certainty
+  const recordPlayer =
+    transferPlayerForRecord! ||
+    buildPromotedPlayerFromProspect(prospect, buyingClub, destination === 'senior' ? wage : 0, contractYears);
+
+  const record = createTransferRecord(
+    recordPlayer,
+    'signing',
+    sellingClub.id,
+    buyingClub.id,
+    offeredFee,
+    seasonYear,
+    currentWeek,
+    'director',
+    destination === 'academy'
+      ? `Youth Academy compensation poach from ${sellingClub.name} (joined Academy)`
+      : `Youth Academy compensation poach from ${sellingClub.name} (Senior Contract)`
+  );
+
+  const updatedDirector: Director = {
+    ...director,
+    netSpend: director.netSpend + offeredFee,
+  };
+
+  return {
+    success: true,
+    updatedClubs,
+    updatedDirector,
+    record,
+    message: resultMsg,
+  };
+}
+
+export const MIN_YOUTH_POSITION_DEPTH: Record<PlayerPosition, number> = {
+  GK: 2,
+  DEF: 5,
+  MID: 5,
+  FWD: 3,
+};
+
+export const MAX_MANAGER_PROMOTIONS_PER_SEASON = 5;
+
+export function getAcademyPromotionWage(tier: LeagueTier): number {
+  return tier === 1 ? 5000 : tier === 2 ? 2500 : 1200;
+}
+
+export interface EvaluateProspectOptions {
+  delegation?: DelegationMatrix;
+  transferHistory?: TransferRecord[];
+  seasonYear?: number;
+  isSeasonEndPass?: boolean;
+}
+
+export interface EvaluateProspectResult {
+  promote: boolean;
+  reason: string;
+  qualifiesByNeed?: boolean;
+  qualifiesByQuality?: boolean;
+}
+
+export function evaluateProspect(
+  prospect: AcademyPlayer,
+  club: Club,
+  _manager?: Manager,
+  options: EvaluateProspectOptions = {}
+): EvaluateProspectResult {
+  if (options.delegation && options.delegation.youthPromotion !== 'manager') {
+    return { promote: false, reason: 'not delegated' };
+  }
+
+  if (prospect.age < 17) {
+    return { promote: false, reason: `age ${prospect.age}` };
+  }
+
+  const healthyCounts: Record<PlayerPosition, number> = {
+    GK: club.squad.filter(p => !p.isInjured && p.position === 'GK').length,
+    DEF: club.squad.filter(p => !p.isInjured && p.position === 'DEF').length,
+    MID: club.squad.filter(p => !p.isInjured && p.position === 'MID').length,
+    FWD: club.squad.filter(p => !p.isInjured && p.position === 'FWD').length,
+  };
+
+  const qualifiesByNeed =
+    club.squad.length < 22 ||
+    healthyCounts[prospect.position] < MIN_YOUTH_POSITION_DEPTH[prospect.position];
+
+  const seasonEndOffset = options.isSeasonEndPass ? 4 : 0;
+  const baseTierThreshold = club.tier === 1 ? 60 : club.tier === 2 ? 56 : 52;
+  const tierThreshold = baseTierThreshold - seasonEndOffset;
+
+  const sortedOverall = [...club.squad].sort((a, b) => b.overall - a.overall);
+  const squad18Threshold =
+    sortedOverall.length >= 18
+      ? sortedOverall[17].overall - 8 - seasonEndOffset
+      : Infinity;
+
+  const qualifiesByQuality =
+    prospect.overall >= tierThreshold || prospect.overall >= squad18Threshold;
+
+  if (!qualifiesByNeed && !qualifiesByQuality) {
+    return {
+      promote: false,
+      reason: 'below threshold',
+      qualifiesByNeed: false,
+      qualifiesByQuality: false,
+    };
+  }
+
+  if (club.squad.length >= 25) {
+    return {
+      promote: false,
+      reason: 'squad full',
+      qualifiesByNeed,
+      qualifiesByQuality,
+    };
+  }
+
+  if (options.transferHistory !== undefined && options.seasonYear !== undefined) {
+    const seasonManagerPromotions = options.transferHistory.filter(
+      tr =>
+        tr.season === options.seasonYear &&
+        tr.toClubId === club.id &&
+        tr.type === 'promotion' &&
+        tr.initiatedBy === 'manager'
+    ).length;
+
+    if (seasonManagerPromotions >= MAX_MANAGER_PROMOTIONS_PER_SEASON) {
+      return {
+        promote: false,
+        reason: 'limit reached',
+        qualifiesByNeed,
+        qualifiesByQuality,
+      };
+    }
+  }
+
+  const baseWage = getAcademyPromotionWage(club.tier);
+  const currentWages = club.squad.reduce((acc, p) => acc + p.wage, 0);
+  const allowedWageBudget =
+    qualifiesByNeed && club.squad.length < 18
+      ? club.wageBudget * 1.05
+      : club.wageBudget;
+
+  if (currentWages + baseWage > allowedWageBudget) {
+    return {
+      promote: false,
+      reason: 'wage budget full',
+      qualifiesByNeed,
+      qualifiesByQuality,
+    };
+  }
+
+  return {
+    promote: true,
+    reason: qualifiesByNeed ? 'squad need' : 'ready',
+    qualifiesByNeed,
+    qualifiesByQuality,
+  };
+}
+
+export interface RunManagerYouthPromotionParams {
+  myClubId: string;
+  club: Club;
+  manager?: Manager;
+  currentWeek: number;
+  seasonYear: number;
+  delegation: DelegationMatrix;
+  transferHistory: TransferRecord[];
+}
+
+export interface RunManagerYouthPromotionResult {
+  updatedClub: Club;
+  newTransfers: TransferRecord[];
+  pressHeadlines: PressHeadline[];
+}
+
+export function runManagerYouthPromotion({
+  myClubId,
+  club,
+  manager,
+  currentWeek,
+  seasonYear,
+  delegation,
+  transferHistory,
+}: RunManagerYouthPromotionParams): RunManagerYouthPromotionResult {
+  if (club.id !== myClubId) {
+    return { updatedClub: club, newTransfers: [], pressHeadlines: [] };
+  }
+
+  const isPreSeasonReview = currentWeek === 1;
+  const isSeasonEndPass = currentWeek >= 45;
+  const isDev =
+    (typeof import.meta !== 'undefined' && Boolean(import.meta.env?.DEV)) ||
+    (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production');
+
+  const initialAcademy = club.academy || [];
+
+  if (isDev && initialAcademy.length > 0) {
+    for (const prospect of initialAcademy) {
+      const evaluation = evaluateProspect(prospect, club, manager, {
+        delegation,
+        transferHistory,
+        seasonYear,
+        isSeasonEndPass,
+      });
+      console.log(
+        `[YouthPromotion][S${seasonYear} W${currentWeek}] ${prospect.name} (${prospect.age}, ${prospect.position}, OVR ${prospect.overall}): promote=${evaluation.promote} | reason="${evaluation.reason}"`
+      );
+    }
+  }
+
+  if (delegation.youthPromotion !== 'manager' || !manager || club.managerId !== manager.id) {
+    return { updatedClub: club, newTransfers: [], pressHeadlines: [] };
+  }
+
+  if (initialAcademy.length === 0) {
+    return { updatedClub: club, newTransfers: [], pressHeadlines: [] };
+  }
+
+  const hasShortPosition = (c: Club): boolean => {
+    const positions: PlayerPosition[] = ['GK', 'DEF', 'MID', 'FWD'];
+    return positions.some(
+      pos => c.squad.filter(p => !p.isInjured && p.position === pos).length < MIN_YOUTH_POSITION_DEPTH[pos]
+    );
+  };
+
+  // Timing gates:
+  // (1) Week 1: pre-season review with NO random chance
+  // (2) Weeks 2-44: need-based runs with NO random chance when squad < 20 (or position short); quality-based has 25% weekly chance
+  // (3) Week 45+ (before Season Finale): season-end pass with quality thresholds lowered by 4 and NO random chance
+  const qualityAllowedThisWeek = isPreSeasonReview || isSeasonEndPass || Math.random() < 0.25;
+  const needBypassRandom =
+    isPreSeasonReview ||
+    isSeasonEndPass ||
+    club.squad.length < 20 ||
+    hasShortPosition(club);
+
+  let workingClub = club;
+  const workingHistory = [...transferHistory];
+  const newTransfers: TransferRecord[] = [];
+  const pressHeadlines: PressHeadline[] = [];
+
+  while (true) {
+    const academy = workingClub.academy || [];
+    if (academy.length === 0) break;
+
+    const shortPositions = new Set<PlayerPosition>(
+      (['GK', 'DEF', 'MID', 'FWD'] as PlayerPosition[]).filter(
+        pos =>
+          workingClub.squad.filter(p => !p.isInjured && p.position === pos).length <
+          MIN_YOUTH_POSITION_DEPTH[pos]
+      )
+    );
+
+    const evaluated = academy.map(prospect => ({
+      prospect,
+      evalResult: evaluateProspect(prospect, workingClub, manager, {
+        delegation,
+        transferHistory: workingHistory,
+        seasonYear,
+        isSeasonEndPass,
+      }),
+    }));
+
+    const eligible = evaluated.filter(({ evalResult }) => {
+      if (!evalResult.promote) return false;
+      if (evalResult.qualifiesByNeed && (needBypassRandom || qualityAllowedThisWeek)) {
+        return true;
+      }
+      if (evalResult.qualifiesByQuality && qualityAllowedThisWeek) {
+        return true;
+      }
+      return false;
+    });
+
+    if (eligible.length === 0) break;
+
+    // Prioritize prospects filling short positions first, then highest overall, then older
+    eligible.sort((a, b) => {
+      const aShort = shortPositions.has(a.prospect.position) ? 1 : 0;
+      const bShort = shortPositions.has(b.prospect.position) ? 1 : 0;
+      if (aShort !== bShort) return bShort - aShort;
+      if (b.prospect.overall !== a.prospect.overall) {
+        return b.prospect.overall - a.prospect.overall;
+      }
+      return b.prospect.age - a.prospect.age;
+    });
+
+    const chosen = eligible[0];
+    const wage = getAcademyPromotionWage(workingClub.tier);
+    const overageFactor =
+      chosen.evalResult.qualifiesByNeed && workingClub.squad.length < 18 ? 1.05 : 1.0;
+
+    const result = promoteAcademyPlayer(
+      workingClub,
+      chosen.prospect.id,
+      wage,
+      3,
+      manager,
+      { allowWageBudgetOverageFactor: overageFactor }
+    );
+
+    if (!result.success) {
+      break;
+    }
+
+    workingClub = result.updatedClub;
+    const record = createTransferRecord(
+      result.promotedPlayer,
+      'promotion',
+      null,
+      workingClub.id,
+      0,
+      seasonYear,
+      currentWeek,
+      'manager',
+      `Promoted by Head Coach ${manager.name} from ${workingClub.name} Youth Academy`
+    );
+    newTransfers.push(record);
+    workingHistory.unshift(record);
+
+    pressHeadlines.push({
+      title: `Head Coach promoted ${chosen.prospect.name} (${chosen.prospect.age}, ${chosen.prospect.position}, ${chosen.prospect.overall}) from the academy`,
+      source: 'Club Academy Wire',
+      category: 'transfer',
+      sentiment: 'positive',
+    });
+  }
+
+  // If manager wanted to promote someone but hit a hard limit (wage budget, squad cap, season limit),
+  // add at most one digest headline per week explaining why.
+  if (needBypassRandom || qualityAllowedThisWeek) {
+    const blockedCandidates = (workingClub.academy || [])
+      .map(prospect => ({
+        prospect,
+        evalResult: evaluateProspect(prospect, workingClub, manager, {
+          delegation,
+          transferHistory: workingHistory,
+          seasonYear,
+          isSeasonEndPass,
+        }),
+      }))
+      .filter(
+        ({ evalResult }) =>
+          !evalResult.promote &&
+          (evalResult.reason === 'wage budget full' ||
+            evalResult.reason === 'squad full' ||
+            evalResult.reason === 'limit reached')
+      )
+      .sort((a, b) => b.prospect.overall - a.prospect.overall);
+
+    if (blockedCandidates.length > 0) {
+      const topBlocked = blockedCandidates[0];
+      const reasonText =
+        topBlocked.evalResult.reason === 'wage budget full'
+          ? 'the wage budget is full'
+          : topBlocked.evalResult.reason === 'squad full'
+            ? 'the 25-man squad is full'
+            : `the ${MAX_MANAGER_PROMOTIONS_PER_SEASON}-promotion seasonal limit has been reached`;
+
+      pressHeadlines.push({
+        title: `Head Coach wanted to promote ${topBlocked.prospect.name} but ${reasonText}`,
+        source: 'Club Academy Wire',
+        category: 'transfer',
+        sentiment: 'neutral',
+      });
+    }
+  }
+
+  return {
+    updatedClub: workingClub,
+    newTransfers,
+    pressHeadlines,
+  };
 }
 
 export function promoteAcademyPlayer(
@@ -1692,14 +3014,16 @@ export function promoteAcademyPlayer(
   academyPlayerId: string,
   wage: number,
   contractYears: number,
-  manager?: Manager
+  manager?: Manager,
+  options?: { allowWageBudgetOverageFactor?: number }
 ): { success: true; updatedClub: Club; promotedPlayer: Player } | { success: false; error: string } {
   if (club.squad.length >= 25) {
     return { success: false, error: 'First-team squad is at maximum 25-man roster capacity! Release or transfer a senior player first.' };
   }
 
   const currentWages = club.squad.reduce((acc, p) => acc + p.wage, 0);
-  if (currentWages + wage > club.wageBudget) {
+  const effectiveWageBudget = club.wageBudget * (options?.allowWageBudgetOverageFactor ?? 1);
+  if (currentWages + wage > effectiveWageBudget) {
     return { success: false, error: `Offered wage (£${(wage / 1000).toFixed(1)}k/wk) exceeds club weekly wage budget headroom!` };
   }
 
@@ -1798,6 +3122,8 @@ export function offerPlayerToClubs(
   const candidateClubs = clubs.filter(c => c.id !== sellingClub!.id);
 
   for (const buyer of candidateClubs) {
+    if (buyer.squad.length >= 25) continue;
+
     // 1. Position evaluation & tactical squad need
     const posPlayers = buyer.squad.filter(p => p.position === player!.position);
     let needsPosition = false;
@@ -1915,6 +3241,9 @@ export function acceptIncomingBid(
   const soldPlayer = sellingClub.squad.find(p => p.id === bid.playerId);
   if (!soldPlayer) {
     throw new Error(`Player not found in seller squad: ${bid.playerId}`);
+  }
+  if (buyingClub && buyingClub.squad.length >= 25) {
+    throw new Error(`${buyingClub.name} already have a full 25-man squad and cannot complete this signing.`);
   }
 
   // 1. Remove player from user's club & credit fee to transferBudget and balance

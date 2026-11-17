@@ -61,7 +61,7 @@ interface TransfersViewProps {
   ) => void;
   onApproveProposal?: (proposalId: string) => { ok: boolean; error?: string };
   onRejectProposal?: (proposalId: string) => void;
-  onAcceptBid?: (bidId: string, trustDelta?: number) => void;
+  onAcceptBid?: (bidId: string, trustDelta?: number) => { ok: boolean; error?: string } | void;
   onRejectBid?: (bidId: string) => void;
   onOfferPlayerToClubs?: (playerId: string, askingPrice: number) => IncomingBid[];
 }
@@ -622,7 +622,7 @@ const TransferHistoryMobileCard = React.memo<HistoryItemProps>(({
               £{(tr.fee / 1000000).toFixed(2)}M{tr.type === 'release' ? ' sev.' : ''}
             </span>
           ) : (
-            <span className="text-slate-400 font-normal">Free</span>
+            <span className="text-slate-400 font-normal">{tr.type === 'renewal' ? 'Extension' : 'Free'}</span>
           )}
         </span>
       </div>
@@ -745,7 +745,7 @@ const TransferHistoryTableRow = React.memo<HistoryItemProps>(({
           </span>
         ) : (
           <span className="text-slate-400 font-normal">
-            Free
+            {tr.type === 'renewal' ? 'Extension' : 'Free'}
           </span>
         )}
         <span className="block text-[10px] text-slate-400 font-normal">
@@ -851,6 +851,10 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
   const [offerYears, setOfferYears] = useState<number>(3);
   const [negotiationStep, setNegotiationStep] = useState<'BID' | 'TERMS' | 'OWNER_CHECK' | 'SUCCESS'>('BID');
   const [signingConfirmCheck, setSigningConfirmCheck] = useState<DelegationDecisionCheck | null>(null);
+  const [negotiationFeedback, setNegotiationFeedback] = useState<{
+    tone: 'error' | 'success';
+    text: string;
+  } | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
 
   // Transfer History filter states
@@ -1254,6 +1258,7 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
     setOfferYears(3);
     setNegotiationStep(item.club ? 'BID' : 'TERMS');
     setSigningConfirmCheck(null);
+    setNegotiationFeedback(null);
     setFeedback(null);
   }, []);
 
@@ -1261,6 +1266,16 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
     sounds.playClick();
     setSelectedBidForReview(bid);
   }, []);
+
+  const submitAcceptedBid = useCallback((bidId: string, trustDelta: number) => {
+    const res = onAcceptBid?.(bidId, trustDelta);
+    if (res && !res.ok) {
+      sounds.playCrisis();
+      setProposalError(res.error || 'Unable to complete incoming transfer bid.');
+      return;
+    }
+    setProposalError(null);
+  }, [onAcceptBid]);
 
   const handleAcceptBidAction = useCallback((bidId: string) => {
     const bid = incomingBids.find(b => b.id === bidId);
@@ -1273,12 +1288,12 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
         return;
       }
       sounds.playSigningStamp();
-      onAcceptBid?.(bidId, check.trustDelta);
+      submitAcceptedBid(bidId, check.trustDelta);
       return;
     }
     sounds.playSigningStamp();
-    onAcceptBid?.(bidId, 0);
-  }, [incomingBids, squadPlayerById, currentClub, manager, delegation, onAcceptBid]);
+    submitAcceptedBid(bidId, 0);
+  }, [incomingBids, squadPlayerById, currentClub, manager, delegation, submitAcceptedBid]);
 
   const handleRejectBidAction = useCallback((bidId: string) => {
     sounds.playCrisis();
@@ -1289,23 +1304,31 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
   const handleClubBid = () => {
     if (!targetPlayer) return;
     sounds.playClick();
+    const safeFee = Number.isFinite(offerFee) ? Math.max(0, offerFee) : NaN;
 
     const validation = evaluateSigning({
       player: targetPlayer.player,
       sellingClub: targetPlayer.club,
       buyingClub: currentClub,
       owner,
-      fee: offerFee,
+      fee: safeFee,
       wage: targetPlayer.player.wage, // temporary valid wage so only club-level steps run first
     });
 
     if (!validation.ok && (validation.failStage === 'squad_cap' || validation.failStage === 'budget' || validation.failStage === 'selling_club')) {
-      setFeedback(validation.reason || 'Transfer bid rejected.');
+      sounds.playCrisis();
+      setNegotiationFeedback({
+        tone: 'error',
+        text: validation.reason || 'Transfer bid rejected.',
+      });
       return;
     }
 
     sounds.playGavel();
-    setFeedback(`BID ACCEPTED: ${targetPlayer.club?.name} has accepted your £${(offerFee / 1000000).toFixed(1)}M proposal. Now agree personal terms with the player.`);
+    setNegotiationFeedback({
+      tone: 'success',
+      text: `BID ACCEPTED: ${targetPlayer.club?.name} accepted your £${(safeFee / 1000000).toFixed(2)}M proposal. Now agree personal terms with ${targetPlayer.player.name}.`,
+    });
     setNegotiationStep('TERMS');
   };
 
@@ -1313,27 +1336,36 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
   const handlePersonalTerms = () => {
     if (!targetPlayer) return;
     sounds.playClick();
+    const safeFee = Number.isFinite(offerFee) ? Math.max(0, offerFee) : NaN;
+    const safeWage = Number.isFinite(offerWage) ? Math.max(0, offerWage) : NaN;
 
     const validation = evaluateSigning({
       player: targetPlayer.player,
       sellingClub: targetPlayer.club,
       buyingClub: currentClub,
       owner,
-      fee: offerFee,
-      wage: offerWage,
+      fee: safeFee,
+      wage: safeWage,
     });
 
     if (!validation.ok && validation.failStage !== 'owner_veto') {
-      setFeedback(validation.reason || 'Personal terms could not be agreed.');
+      sounds.playCrisis();
+      setNegotiationFeedback({
+        tone: 'error',
+        text: validation.reason || 'Personal terms could not be agreed.',
+      });
       return;
     }
 
+    setNegotiationFeedback(null);
     setSigningConfirmCheck(null);
     setNegotiationStep('OWNER_CHECK');
   };
 
   const executeCompleteSigning = (trustDelta: number) => {
     if (!targetPlayer) return;
+    const safeFee = Number.isFinite(offerFee) ? Math.max(0, offerFee) : 0;
+    const safeWage = Number.isFinite(offerWage) ? Math.max(1000, offerWage) : Math.max(1000, targetPlayer.player.wage);
 
     const result = completeSigning({
       player: targetPlayer.player,
@@ -1344,8 +1376,8 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
       director,
       owner,
       manager,
-      fee: offerFee,
-      wage: offerWage,
+      fee: safeFee,
+      wage: safeWage,
       contractYears: offerYears,
       season: seasonYear,
       week: currentWeek,
@@ -1362,6 +1394,8 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
       result.record
     );
 
+    setFeedback(null);
+    setNegotiationFeedback(null);
     setSigningConfirmCheck(null);
     setNegotiationStep('SUCCESS');
     sounds.playFanfare();
@@ -1370,21 +1404,28 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
   // Final Owner Approval & Delegation Check via shared transferService
   const handleFinalizeSigning = () => {
     if (!targetPlayer) return;
+    const safeFee = Number.isFinite(offerFee) ? Math.max(0, offerFee) : NaN;
+    const safeWage = Number.isFinite(offerWage) ? Math.max(0, offerWage) : NaN;
 
     const validation = evaluateSigning({
       player: targetPlayer.player,
       sellingClub: targetPlayer.club,
       buyingClub: currentClub,
       owner,
-      fee: offerFee,
-      wage: offerWage,
+      fee: safeFee,
+      wage: safeWage,
     });
 
     if (!validation.ok) {
       sounds.playCrisis();
-      setFeedback(validation.reason || 'Transfer blocked by boardroom checks.');
+      setNegotiationFeedback({
+        tone: 'error',
+        text: validation.reason || 'Transfer blocked by boardroom checks.',
+      });
       return;
     }
+
+    setNegotiationFeedback(null);
 
     const delegationCheck = evaluateDirectorSigningDelegation(
       currentClub,
@@ -2380,46 +2421,71 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
               </div>
             </div>
 
-            {pendingBidConfirm && (
-              <div className="bg-rose-950/35 border border-rose-500/40 rounded-xl p-4 space-y-3">
-                <div className="flex items-start gap-2.5">
-                  <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-                  <div className="space-y-1 text-xs">
-                    <span className="font-bold text-white block">
-                      {pendingBidConfirm.check.title || 'Head Coach Warning'}
+            <Modal
+              isOpen={Boolean(pendingBidConfirm)}
+              onClose={() => setPendingBidConfirm(null)}
+              maxWidthClass="max-w-md"
+              borderClass="border-rose-500/40"
+              ariaLabel={pendingBidConfirm?.check.title || 'Head Coach Warning'}
+              header={
+                pendingBidConfirm && (
+                  <div className="flex items-start gap-2.5">
+                    <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="text-xs font-bold text-amber-400 uppercase tracking-wider block">
+                        Delegation Confirmation
+                      </span>
+                      <h3 className="text-lg font-extrabold text-white">
+                        {pendingBidConfirm.check.title || 'Head Coach Warning'}
+                      </h3>
+                    </div>
+                  </div>
+                )
+              }
+              footer={
+                pendingBidConfirm && (
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setPendingBidConfirm(null)}
+                      className="min-h-11 px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-slate-200 cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const targetBidId = pendingBidConfirm.bid.id;
+                        const delta = pendingBidConfirm.check.trustDelta;
+                        sounds.playSigningStamp();
+                        setPendingBidConfirm(null);
+                        submitAcceptedBid(targetBidId, delta);
+                      }}
+                      className="min-h-11 px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold cursor-pointer"
+                    >
+                      Force it through ({pendingBidConfirm.check.trustDelta} Trust)
+                    </button>
+                  </div>
+                )
+              }
+            >
+              {pendingBidConfirm && (
+                <div className="space-y-3 text-xs">
+                  <p className="text-slate-200 leading-relaxed">
+                    {pendingBidConfirm.check.mode === 'manager'
+                      ? `Overriding your Head Coach will cost trust (${pendingBidConfirm.check.trustDelta} trust).`
+                      : pendingBidConfirm.check.reason}
+                  </p>
+                  <div className="bg-slate-900/80 border border-white/10 rounded-xl p-3 font-mono text-slate-300">
+                    Sale: <strong className="text-white">{pendingBidConfirm.bid.playerName}</strong> to{' '}
+                    <strong className="text-white">{pendingBidConfirm.bid.buyingClubName}</strong> ·{' '}
+                    <span className="text-emerald-400 font-bold">
+                      £{(pendingBidConfirm.bid.offeredFee / 1000000).toFixed(2)}M
                     </span>
-                    <p className="text-slate-200 leading-relaxed">
-                      {pendingBidConfirm.check.mode === 'manager'
-                        ? `Overriding your Head Coach will cost trust (${pendingBidConfirm.check.trustDelta} trust).`
-                        : pendingBidConfirm.check.reason}
-                    </p>
-                    <p className="text-slate-400 font-mono">
-                      Sale: {pendingBidConfirm.bid.playerName} to {pendingBidConfirm.bid.buyingClubName} · £{(pendingBidConfirm.bid.offeredFee / 1000000).toFixed(2)}M
-                    </p>
                   </div>
                 </div>
-                <div className="flex flex-wrap items-center justify-end gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setPendingBidConfirm(null)}
-                    className="min-h-11 px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-slate-200 cursor-pointer"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      sounds.playSigningStamp();
-                      onAcceptBid?.(pendingBidConfirm.bid.id, pendingBidConfirm.check.trustDelta);
-                      setPendingBidConfirm(null);
-                    }}
-                    className="min-h-11 px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold cursor-pointer"
-                  >
-                    Force it through ({pendingBidConfirm.check.trustDelta} Trust)
-                  </button>
-                </div>
-              </div>
-            )}
+              )}
+            </Modal>
 
           {/* Incoming Bids Financial & Activity Summary */}
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
@@ -3158,6 +3224,7 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
         onClose={() => {
           setTargetPlayer(null);
           setSigningConfirmCheck(null);
+          setNegotiationFeedback(null);
         }}
         maxWidthClass="max-w-lg"
         ariaLabel={targetPlayer ? `Transfer Negotiation Suite: ${targetPlayer.player.name}` : 'Transfer Negotiation Suite'}
@@ -3181,6 +3248,7 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
             <div className="flex flex-wrap items-center justify-end gap-3">
               {negotiationStep === 'BID' && (
                 <button
+                  type="button"
                   onClick={handleClubBid}
                   className="px-6 py-2.5 min-h-11 lg:min-h-0 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-bold text-xs rounded-xl shadow-md transition-all cursor-pointer"
                 >
@@ -3189,6 +3257,7 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
               )}
               {negotiationStep === 'TERMS' && (
                 <button
+                  type="button"
                   onClick={handlePersonalTerms}
                   className="px-6 py-2.5 min-h-11 lg:min-h-0 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-bold text-xs rounded-xl shadow-md transition-all cursor-pointer"
                 >
@@ -3198,12 +3267,17 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
               {negotiationStep === 'OWNER_CHECK' && !signingConfirmCheck && (
                 <>
                   <button
-                    onClick={() => setNegotiationStep('TERMS')}
+                    type="button"
+                    onClick={() => {
+                      setNegotiationFeedback(null);
+                      setNegotiationStep('TERMS');
+                    }}
                     className="px-4 py-2 min-h-11 lg:min-h-0 text-xs font-semibold text-slate-400 hover:text-white cursor-pointer"
                   >
                     Back
                   </button>
                   <button
+                    type="button"
                     onClick={handleFinalizeSigning}
                     className="px-6 py-2.5 min-h-11 lg:min-h-0 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 text-white font-extrabold text-xs rounded-xl shadow-lg shadow-emerald-500/20 transition-all cursor-pointer"
                   >
@@ -3214,8 +3288,10 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
               {negotiationStep === 'OWNER_CHECK' && signingConfirmCheck && (
                 <>
                   <button
+                    type="button"
                     onClick={() => {
                       setSigningConfirmCheck(null);
+                      setNegotiationFeedback(null);
                       setTargetPlayer(null);
                     }}
                     className="px-4 py-2.5 min-h-11 lg:min-h-0 bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-slate-200 rounded-xl cursor-pointer"
@@ -3223,6 +3299,7 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
                     Cancel
                   </button>
                   <button
+                    type="button"
                     onClick={() => {
                       sounds.playSigningStamp();
                       executeCompleteSigning(signingConfirmCheck.trustDelta);
@@ -3235,7 +3312,11 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
               )}
               {negotiationStep === 'SUCCESS' && (
                 <button
-                  onClick={() => setTargetPlayer(null)}
+                  type="button"
+                  onClick={() => {
+                    setNegotiationFeedback(null);
+                    setTargetPlayer(null);
+                  }}
                   className="px-6 py-2.5 min-h-11 lg:min-h-0 bg-white/10 hover:bg-white/20 text-white font-bold text-xs rounded-xl transition-all cursor-pointer"
                 >
                   Return to Transfer Hub
@@ -3262,6 +3343,34 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
               </span>
             </div>
 
+            {negotiationFeedback && negotiationStep !== 'SUCCESS' && (
+              <div
+                role="alert"
+                className={`mb-4 p-3.5 rounded-xl border text-xs flex items-start justify-between gap-2 ${
+                  negotiationFeedback.tone === 'error'
+                    ? 'bg-rose-950/50 border-rose-500/40 text-rose-200'
+                    : 'bg-emerald-950/40 border-emerald-500/35 text-emerald-200'
+                }`}
+              >
+                <div className="flex items-start gap-2 min-w-0">
+                  {negotiationFeedback.tone === 'error' ? (
+                    <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  ) : (
+                    <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                  )}
+                  <span className="leading-relaxed">{negotiationFeedback.text}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setNegotiationFeedback(null)}
+                  aria-label="Dismiss negotiation notice"
+                  className="text-slate-400 hover:text-white cursor-pointer shrink-0 px-1"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
             {/* Step 1: Club Bid */}
             {negotiationStep === 'BID' && (
               <div className="space-y-4">
@@ -3271,7 +3380,7 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
                     £{(targetPlayer.player.value / 1000000).toFixed(2)}M
                   </span>
                   <span className="text-xs sm:text-[11px] text-slate-500 block mt-1">
-                    Your remaining transfer war chest: £{(currentClub.transferBudget / 1000000).toFixed(2)}M
+                    Your remaining transfer war chest: £{(currentClub.transferBudget / 1000000).toFixed(2)}M · Cash reserves: £{(currentClub.balance / 1000000).toFixed(2)}M
                   </span>
                 </div>
 
@@ -3285,7 +3394,10 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
                     min={100000}
                     step={250000}
                     value={offerFee}
-                    onChange={e => setOfferFee(Number(e.target.value))}
+                    onChange={e => {
+                      setNegotiationFeedback(null);
+                      setOfferFee(Number(e.target.value));
+                    }}
                     className="w-full min-h-11 lg:min-h-0 px-3.5 py-2.5 bg-slate-900 border border-white/10 rounded-lg text-white font-mono text-base md:text-sm focus:outline-none focus:border-amber-400"
                   />
                 </div>
@@ -3315,7 +3427,10 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
                     min={1000}
                     step={1000}
                     value={offerWage}
-                    onChange={e => setOfferWage(Number(e.target.value))}
+                    onChange={e => {
+                      setNegotiationFeedback(null);
+                      setOfferWage(Number(e.target.value));
+                    }}
                     className="w-full min-h-11 lg:min-h-0 px-3.5 py-2.5 bg-slate-900 border border-white/10 rounded-lg text-white font-mono text-base md:text-sm focus:outline-none focus:border-amber-400"
                   />
                 </div>

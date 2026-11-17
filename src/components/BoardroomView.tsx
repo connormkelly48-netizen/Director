@@ -12,20 +12,43 @@ interface BoardroomViewProps {
   club: Club;
   owner: Owner;
   director: Director;
+  currentWeek: number;
+  seasonYear: number;
   onUpdateClub: (updatedClub: Club, updatedDirector: Director, updatedOwner: Owner) => void;
 }
+
+const PETITION_COOLDOWN_WEEKS = 10;
 
 export const BoardroomView: React.FC<BoardroomViewProps> = ({
   club,
   owner,
   director,
+  currentWeek,
+  seasonYear,
   onUpdateClub,
 }) => {
   const [boardFeedback, setBoardFeedback] = useState<string | null>(null);
 
+  const currentAbsoluteWeek = seasonYear * 46 + currentWeek;
+  const lastPetitionAbsoluteWeek =
+    director.lastPetitionSeason !== undefined && director.lastPetitionWeek !== undefined
+      ? director.lastPetitionSeason * 46 + director.lastPetitionWeek
+      : null;
+  const weeksSinceLastPetition =
+    lastPetitionAbsoluteWeek !== null ? Math.max(0, currentAbsoluteWeek - lastPetitionAbsoluteWeek) : null;
+  const cooldownRemaining =
+    weeksSinceLastPetition !== null ? Math.max(0, PETITION_COOLDOWN_WEEKS - weeksSinceLastPetition) : 0;
+
   // Handle board funding requests
   const handleRequest = (type: 'transfer' | 'wage' | 'facility') => {
     sounds.playGavel();
+
+    if (cooldownRemaining > 0) {
+      setBoardFeedback(
+        `BOARDROOM STANDING ORDER: You have already received executive funding recently. Wait ${cooldownRemaining} more week${cooldownRemaining === 1 ? '' : 's'} before submitting another petition.`
+      );
+      return;
+    }
 
     if (owner.approval < 55) {
       setBoardFeedback(`${owner.name} rejected your request: "Current on-pitch performances do not justify further capital expenditure. Deliver results with the existing squad first."`);
@@ -37,6 +60,12 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
       return;
     }
 
+    const stampedDirector: Director = {
+      ...director,
+      lastPetitionWeek: currentWeek,
+      lastPetitionSeason: seasonYear,
+    };
+
     if (type === 'transfer') {
       const injection = club.tier === 1 ? 25000000 : club.tier === 2 ? 8000000 : 2500000;
       const updatedClub = {
@@ -45,7 +74,7 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
         balance: club.balance + injection,
       };
       const updatedOwner = { ...owner, approval: Math.max(0, owner.approval - 3) };
-      onUpdateClub(updatedClub, director, updatedOwner);
+      onUpdateClub(updatedClub, stampedDirector, updatedOwner);
       setBoardFeedback(`APPROVED: ${owner.name} has sanctioned an additional £${(injection / 1000000).toFixed(1)}M for your transfer war chest!`);
     } else if (type === 'wage') {
       const wageIncrease = club.tier === 1 ? 350000 : club.tier === 2 ? 100000 : 35000;
@@ -54,7 +83,7 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
         wageBudget: club.wageBudget + wageIncrease,
       };
       const updatedOwner = { ...owner, approval: Math.max(0, owner.approval - 2) };
-      onUpdateClub(updatedClub, director, updatedOwner);
+      onUpdateClub(updatedClub, stampedDirector, updatedOwner);
       setBoardFeedback(`APPROVED: The board has increased the weekly wage ceiling by +£${(wageIncrease / 1000).toFixed(0)}k/week!`);
     } else {
       const cost = club.tier === 1 ? 15000000 : club.tier === 2 ? 5000000 : 1500000;
@@ -67,7 +96,10 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
         balance: club.balance - cost,
         prestige: Math.min(100, club.prestige + 2),
       };
-      const updatedDirector = { ...director, reputation: Math.min(100, director.reputation + 3) };
+      const updatedDirector: Director = {
+        ...stampedDirector,
+        reputation: Math.min(100, director.reputation + 3),
+      };
       onUpdateClub(updatedClub, updatedDirector, owner);
       setBoardFeedback(`SANCTIONED: Training ground modernization approved! Club prestige and director reputation improved.`);
     }
@@ -244,13 +276,20 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
 
       {/* Interactive Board Funding Requests */}
       <div className="bg-[#111827] border border-white/10 rounded-xl p-4 sm:p-6">
-        <div className="border-b border-white/10 pb-3 mb-4">
-          <h3 className="text-xs font-bold text-white uppercase tracking-wider">
-            Formal Boardroom Petitions & Requests
-          </h3>
-          <p className="text-xs text-slate-400 mt-0.5 max-w-[75ch]">
-            Submit formal funding appeals to the board. Approval depends on owner wealth, patience, and current board trust.
-          </p>
+        <div className="border-b border-white/10 pb-3 mb-4 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="text-xs font-bold text-white uppercase tracking-wider">
+              Formal Boardroom Petitions & Requests
+            </h3>
+            <p className="text-xs text-slate-400 mt-0.5 max-w-[75ch]">
+              Submit formal funding appeals to the board. Approval depends on owner wealth, patience, current board trust, and a {PETITION_COOLDOWN_WEEKS}-week executive cooldown between successful appeals.
+            </p>
+          </div>
+          {cooldownRemaining > 0 && (
+            <span className="px-3 py-1 rounded-lg bg-amber-400/10 border border-amber-400/30 text-xs font-mono font-bold text-amber-300">
+              Cooldown: {cooldownRemaining} wk{cooldownRemaining === 1 ? '' : 's'} remaining
+            </span>
+          )}
         </div>
 
         {boardFeedback && (
@@ -279,10 +318,12 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
               </p>
             </div>
             <button
+              type="button"
+              disabled={cooldownRemaining > 0}
               onClick={() => handleRequest('transfer')}
-              className="w-full py-2 min-h-11 lg:min-h-0 bg-white/5 hover:bg-white/10 active:scale-[0.98] border border-white/10 text-xs font-bold text-amber-400 rounded-lg transition-all cursor-pointer"
+              className="w-full py-2 min-h-11 lg:min-h-0 bg-white/5 hover:bg-white/10 active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 text-xs font-bold text-amber-400 rounded-lg transition-all cursor-pointer"
             >
-              Petition for Transfer Funds
+              {cooldownRemaining > 0 ? `Next appeal in ${cooldownRemaining} wks` : 'Petition for Transfer Funds'}
             </button>
           </div>
 
@@ -297,10 +338,12 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
               </p>
             </div>
             <button
+              type="button"
+              disabled={cooldownRemaining > 0}
               onClick={() => handleRequest('wage')}
-              className="w-full py-2 min-h-11 lg:min-h-0 bg-white/5 hover:bg-white/10 active:scale-[0.98] border border-white/10 text-xs font-bold text-emerald-400 rounded-lg transition-all cursor-pointer"
+              className="w-full py-2 min-h-11 lg:min-h-0 bg-white/5 hover:bg-white/10 active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 text-xs font-bold text-emerald-400 rounded-lg transition-all cursor-pointer"
             >
-              Petition for Wage Hike
+              {cooldownRemaining > 0 ? `Next appeal in ${cooldownRemaining} wks` : 'Petition for Wage Hike'}
             </button>
           </div>
 
@@ -315,10 +358,12 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
               </p>
             </div>
             <button
+              type="button"
+              disabled={cooldownRemaining > 0}
               onClick={() => handleRequest('facility')}
-              className="w-full py-2 min-h-11 lg:min-h-0 bg-white/5 hover:bg-white/10 active:scale-[0.98] border border-white/10 text-xs font-bold text-blue-400 rounded-lg transition-all cursor-pointer"
+              className="w-full py-2 min-h-11 lg:min-h-0 bg-white/5 hover:bg-white/10 active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 text-xs font-bold text-blue-400 rounded-lg transition-all cursor-pointer"
             >
-              Commission Upgrade
+              {cooldownRemaining > 0 ? `Next appeal in ${cooldownRemaining} wks` : 'Commission Upgrade'}
             </button>
           </div>
 

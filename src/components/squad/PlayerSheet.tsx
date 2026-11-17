@@ -157,6 +157,11 @@ export const PlayerSheet: React.FC<PlayerSheetProps> = ({
                   Injured ({player.injuryWeeks ?? 1}w out)
                 </p>
               )}
+              {player.retiringAtSeasonEnd && (
+                <p className="text-xs font-bold text-amber-300">
+                  Retiring at Season End
+                </p>
+              )}
             </div>
           </div>
           <button
@@ -303,6 +308,11 @@ export const PlayerSheet: React.FC<PlayerSheetProps> = ({
               {player.isInjured && (
                 <p className="text-xs font-bold text-rose-400">
                   Injured · {player.injuryWeeks ?? 1} weeks remaining
+                </p>
+              )}
+              {player.retiringAtSeasonEnd && (
+                <p className="text-xs font-bold text-amber-300">
+                  Retiring at Season End
                 </p>
               )}
             </div>
