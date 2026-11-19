@@ -1,8 +1,17 @@
 import React, { useState } from 'react';
 import { Club, Director, JobVacancy, Owner, Manager } from '../types/game';
-import { Briefcase, Award, TrendingUp, Building2, Check, ArrowRight, UserX, AlertTriangle, ShieldCheck, UserCheck } from 'lucide-react';
+import { Briefcase, Award, TrendingUp, Building2, Check, ArrowRight, UserX, AlertTriangle, ShieldCheck, UserCheck, History } from 'lucide-react';
 import { sounds } from '../services/soundEffects';
 import { Modal } from './ui/Modal';
+import { HireManagerModal } from './HireManagerModal';
+import { ManagerProfileModal } from './ManagerProfileModal';
+import {
+  calculateHiringCosts,
+  calculateManagerSigningFee,
+  deriveManagerAttributes,
+  evaluateManagerWillingness,
+  formatCurrencyCompact,
+} from '../services/managerService';
 
 interface JobMarketViewProps {
   director: Director;
@@ -12,9 +21,18 @@ interface JobMarketViewProps {
   allOwners: Owner[];
   allManagers?: Manager[];
   currentManager?: Manager | undefined;
+  seasonYear?: number;
+  currentWeek?: number;
   onAcceptJob: (newClubId: string, updatedDirector: Director) => void;
   onResign: () => void;
-  onHireManager?: (newManager: Manager | null, updatedDirector: Director, updatedClub: Club, updatedOwner: Owner) => void;
+  onHireManager?: (
+    newManager: Manager | null,
+    updatedDirector: Director,
+    updatedClub: Club,
+    updatedOwner: Owner,
+    updatedRivalClub?: Club,
+    updatedSackedManager?: Manager
+  ) => void;
 }
 
 export const JobMarketView: React.FC<JobMarketViewProps> = ({
@@ -25,6 +43,8 @@ export const JobMarketView: React.FC<JobMarketViewProps> = ({
   allOwners,
   allManagers,
   currentManager,
+  seasonYear = 2026,
+  currentWeek = 1,
   onAcceptJob,
   onResign,
   onHireManager,
@@ -42,9 +62,12 @@ export const JobMarketView: React.FC<JobMarketViewProps> = ({
   const [managerStyleFilter, setManagerStyleFilter] = useState<string>('all');
   const [managerSearchQuery, setManagerSearchQuery] = useState<string>('');
   const [managerFeedback, setManagerFeedback] = useState<string | null>(null);
+  const [selectedManagerForHire, setSelectedManagerForHire] = useState<Manager | null>(null);
+  const [profileManager, setProfileManager] = useState<Manager | null>(null);
 
-  // Query strictly all available managers where clubId === null
+  // Query all available free agent managers where clubId === null
   const availableManagers = (allManagers || []).filter(m => m.clubId === null);
+  const currentClubOwner = currentClub ? allOwners.find(o => o.id === currentClub.ownerId) : undefined;
 
   const filteredManagers = availableManagers.filter(m => {
     if (managerStyleFilter !== 'all' && m.tacticalStyle !== managerStyleFilter) return false;
@@ -57,43 +80,17 @@ export const JobMarketView: React.FC<JobMarketViewProps> = ({
     return true;
   });
 
-  const handleHireAvailableManager = (mgr: Manager) => {
-    if (!currentClub || !onHireManager) return;
-    const owner = allOwners.find(o => o.id === currentClub.ownerId);
-    if (!owner) return;
-
-    sounds.playSigningStamp();
-
-    if (currentClub.wageBudget - currentClub.squad.reduce((a, b) => a + b.wage, 0) < mgr.wage) {
-      setManagerFeedback(`HIRE FAILED: Insufficient weekly wage budget to meet ${mgr.name}'s demands (£${(mgr.wage / 1000).toFixed(0)}k/wk).`);
-      return;
-    }
-
-    const updatedManager: Manager = {
-      ...mgr,
-      clubId: currentClub.id,
-      trustInDirector: 75,
-      contractYears: 3,
-    };
-
-    const updatedClub: Club = {
-      ...currentClub,
-      managerId: mgr.id,
-    };
-
-    const updatedDirector: Director = {
-      ...director,
-      boardTrust: Math.min(100, director.boardTrust + 5),
-      fanApproval: Math.min(100, director.fanApproval + (mgr.reputation > 85 ? 10 : 4)),
-    };
-
-    const updatedOwner: Owner = {
-      ...owner,
-      approval: Math.min(100, owner.approval + 5),
-    };
-
-    setManagerFeedback(`APPOINTMENT CONFIRMED: ${mgr.name} has been appointed Head Coach of ${currentClub.name}!`);
-    onHireManager(updatedManager, updatedDirector, updatedClub, updatedOwner);
+  const handleConfirmHireFromMarket = (
+    newManager: Manager,
+    updatedDirector: Director,
+    updatedClub: Club,
+    updatedOwner: Owner,
+    updatedRivalClub?: Club
+  ) => {
+    if (!onHireManager) return;
+    setSelectedManagerForHire(null);
+    setManagerFeedback(`APPOINTMENT CONFIRMED: ${newManager.name} has been appointed Head Coach of ${updatedClub.name}!`);
+    onHireManager(newManager, updatedDirector, updatedClub, updatedOwner, updatedRivalClub);
   };
 
   const startInterview = (vac: JobVacancy) => {
@@ -139,9 +136,9 @@ export const JobMarketView: React.FC<JobMarketViewProps> = ({
       allOwners.find(o => o.name === selectedVacancy.ownerName);
 
     // Reputation check
-    if (director.reputation < selectedVacancy.reputationRequired - 10) {
+    if (director.reputation < selectedVacancy.reputationRequired) {
       sounds.playCrisis();
-      setInterviewResult(`REJECTION: Chairman ${selectedVacancy.ownerName}: "We appreciate your interest, but the board requires an executive with higher pedigree for a club of our ambitions."`);
+      setInterviewResult(`REJECTION: Chairman ${selectedVacancy.ownerName}: "Needs reputation ${selectedVacancy.reputationRequired}, you have ${director.reputation}. Our board requires greater proven pedigree."`);
       return;
     }
 
@@ -313,49 +310,74 @@ export const JobMarketView: React.FC<JobMarketViewProps> = ({
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-4">
-              {vacancies.map(vac => (
-                <div 
-                  key={vac.clubId}
-                  className="w-full bg-slate-900/80 border border-white/10 rounded-xl p-4 flex flex-col justify-between hover:border-white/20 transition-all"
-                >
-                  <div>
-                    <div className="flex items-start justify-between mb-2">
-                      <div>
-                        <h4 className="text-base font-bold text-white">{vac.clubName}</h4>
-                        <span className="text-xs text-slate-400">
-                          {vac.tier === 1 ? 'Premier League' : vac.tier === 2 ? 'Championship' : 'League One'} · {vac.expectation}
+              {vacancies.map(vac => {
+                const isLocked = director.reputation < vac.reputationRequired;
+                const lockText = vac.lockReason || `Needs reputation ${vac.reputationRequired}, you have ${director.reputation}`;
+                return (
+                  <div 
+                    key={vac.clubId}
+                    className={`w-full bg-slate-900/80 border rounded-xl p-4 flex flex-col justify-between transition-all ${
+                      isLocked ? 'border-rose-500/25 opacity-90' : 'border-white/10 hover:border-white/20'
+                    }`}
+                  >
+                    <div>
+                      <div className="flex items-start justify-between gap-2 mb-2">
+                        <div className="min-w-0">
+                          <h4 className="text-base font-bold text-white truncate">{vac.clubName}</h4>
+                          <span className="text-xs text-slate-400 block">
+                            {vac.tier === 1 ? 'Premier League' : vac.tier === 2 ? 'Championship' : 'League One'} · {vac.expectation}
+                          </span>
+                        </div>
+                        <span
+                          className={`text-xs sm:text-[10px] font-mono font-bold px-2 py-0.5 rounded shrink-0 ${
+                            isLocked
+                              ? 'bg-rose-500/15 border border-rose-500/30 text-rose-300'
+                              : 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-300'
+                          }`}
+                        >
+                          {isLocked ? `Locked · ${vac.reputationRequired} Rep` : `Unlocked · ${vac.reputationRequired} Rep`}
                         </span>
                       </div>
-                      <span className="text-xs sm:text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-slate-800 text-slate-300">
-                        Req: {vac.reputationRequired} Rep
-                      </span>
+
+                      <div className="space-y-1 text-xs text-slate-300 my-2 pt-2 border-t border-white/5">
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-400">Chairman:</span>
+                          <span className="font-semibold text-slate-200">{vac.ownerName}</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-400">Owner Patience:</span>
+                          <span className="font-semibold text-amber-400 capitalize">{vac.ownerPatience}</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-400">War Chest:</span>
+                          <span className="font-mono text-white font-bold">£{(vac.transferBudget / 1000000).toFixed(1)}M</span>
+                        </div>
+                      </div>
+
+                      {isLocked && (
+                        <div className="mt-2 p-2 rounded-lg bg-rose-950/30 border border-rose-500/25 text-[11px] text-rose-300 flex items-start gap-1.5">
+                          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                          <span>{lockText}</span>
+                        </div>
+                      )}
                     </div>
 
-                    <div className="space-y-1 text-xs text-slate-300 my-2 pt-2 border-t border-white/5">
-                      <div className="flex items-center justify-between">
-                        <span className="text-slate-400">Chairman:</span>
-                        <span className="font-semibold text-slate-200">{vac.ownerName}</span>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-slate-400">Owner Patience:</span>
-                        <span className="font-semibold text-amber-400 capitalize">{vac.ownerPatience}</span>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-slate-400">War Chest:</span>
-                        <span className="font-mono text-white font-bold">£{(vac.transferBudget / 1000000).toFixed(1)}M</span>
-                      </div>
-                    </div>
+                    <button
+                      type="button"
+                      disabled={isLocked}
+                      onClick={() => startInterview(vac)}
+                      className={`w-full mt-3 py-2 min-h-11 lg:min-h-0 font-bold text-xs rounded-lg transition-all flex items-center justify-center gap-1.5 ${
+                        isLocked
+                          ? 'bg-slate-800 border border-white/10 text-slate-400 cursor-not-allowed'
+                          : 'bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 cursor-pointer active:scale-95'
+                      }`}
+                    >
+                      <span>{isLocked ? `Requires ${vac.reputationRequired} Reputation` : 'Attend Boardroom Interview'}</span>
+                      {!isLocked && <ArrowRight className="w-3.5 h-3.5" />}
+                    </button>
                   </div>
-
-                  <button
-                    onClick={() => startInterview(vac)}
-                    className="w-full mt-3 py-2 min-h-11 lg:min-h-0 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-bold text-xs rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1.5"
-                  >
-                    <span>Attend Boardroom Interview</span>
-                    <ArrowRight className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
@@ -406,66 +428,101 @@ export const JobMarketView: React.FC<JobMarketViewProps> = ({
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-4">
-            {filteredManagers.map(mgr => (
-              <div 
-                key={mgr.id}
-                className="bg-slate-900/80 border border-white/10 rounded-xl p-4 flex flex-col justify-between hover:border-white/20 transition-all"
-              >
-                <div>
-                  <div className="flex items-start justify-between mb-1.5">
-                    <div>
-                      <h4 className="text-sm font-bold text-white">{mgr.name}</h4>
-                      <span className="text-xs sm:text-[11px] text-slate-400 block">{mgr.nationality} · Age {mgr.age}</span>
-                    </div>
-                    <span className="text-xs font-bold font-mono px-2 py-0.5 bg-amber-400/10 border border-amber-400/20 text-amber-400 rounded">
-                      Rep {mgr.reputation}
-                    </span>
-                  </div>
+            {filteredManagers.map(mgr => {
+              const attrs = mgr.attributes ?? deriveManagerAttributes(mgr);
+              const signingFee = calculateManagerSigningFee(mgr);
+              const costs = calculateHiringCosts(mgr, mgr.wage);
+              const willingness = currentClub && currentClubOwner
+                ? evaluateManagerWillingness(mgr, currentClub, currentClubOwner, mgr.wage)
+                : null;
 
-                  <div className="space-y-1 text-xs text-slate-300 my-2 pt-2 border-t border-white/5">
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-400">Tactics:</span>
-                      <span className="font-semibold text-slate-200">{mgr.tacticalStyle}</span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-400">Preferred System:</span>
-                      <span className="font-mono text-slate-200">{mgr.preferredFormation}</span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-400">Control Desire:</span>
-                      <span className={`capitalize font-semibold ${
-                        mgr.controlDesire === 'autocrat' ? 'text-rose-400' :
-                        mgr.controlDesire === 'collaborator' ? 'text-amber-400' : 'text-emerald-400'
-                      }`}>
-                        {mgr.controlDesire}
+              return (
+                <div 
+                  key={mgr.id}
+                  className="bg-slate-900/80 border border-white/10 rounded-xl p-4 flex flex-col justify-between hover:border-white/20 transition-all"
+                >
+                  <div>
+                    <div className="flex items-start justify-between mb-1.5">
+                      <div>
+                        <h4 className="text-sm font-bold text-white">{mgr.name}</h4>
+                        <span className="text-xs sm:text-[11px] text-slate-400 block">{mgr.nationality} · Age {mgr.age}</span>
+                      </div>
+                      <span className="text-xs font-bold font-mono tabular-nums text-amber-400">
+                        Rep {mgr.reputation}
                       </span>
                     </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-400">Wage Demand:</span>
-                      <span className="font-mono text-emerald-400 font-bold">£{(mgr.wage / 1000).toFixed(0)}k/wk</span>
+
+                    <div className="space-y-1 text-xs text-slate-300 my-2 pt-2 border-t border-white/5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-400">Attributes:</span>
+                        <span className="font-mono tabular-nums text-slate-200">
+                          {attrs.tactical}/{attrs.coaching}/{attrs.manManagement}/{attrs.youthDevelopment}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-400">Tactics:</span>
+                        <span className="font-semibold text-slate-200">{mgr.tacticalStyle}</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-400">Wage Demand:</span>
+                        <span className="font-mono tabular-nums text-emerald-400 font-bold">£{(mgr.wage / 1000).toFixed(1)}k/wk</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-400">Signing Fee (Total):</span>
+                        <span className="font-mono tabular-nums text-slate-200 font-semibold">
+                          {formatCurrencyCompact(signingFee)} ({formatCurrencyCompact(costs.totalCost)})
+                        </span>
+                      </div>
+                      {willingness && (
+                        <div className="pt-1 text-[11px]">
+                          <span className={willingness.willing ? 'text-emerald-400 font-semibold' : 'text-rose-400 font-semibold'}>
+                            {willingness.statusLabel}
+                          </span>
+                          {!willingness.willing && willingness.primaryReason && (
+                            <span className="text-slate-400 block">{willingness.primaryReason}</span>
+                          )}
+                        </div>
+                      )}
                     </div>
+
+                    <p className="text-xs sm:text-[11px] text-slate-400 leading-snug italic font-serif mb-3 line-clamp-2">
+                      &ldquo;{mgr.profileSnippet}&rdquo;
+                    </p>
                   </div>
 
-                  <p className="text-xs sm:text-[11px] text-slate-400 leading-snug italic font-serif mb-3 line-clamp-2">
-                    "{mgr.profileSnippet}"
-                  </p>
+                  {currentClub && currentClubOwner && onHireManager ? (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          sounds.playClick();
+                          setProfileManager(mgr);
+                        }}
+                        className="py-2 px-3 min-h-11 lg:min-h-0 bg-white/5 hover:bg-white/10 border border-white/10 text-slate-200 font-semibold text-xs rounded-lg transition-all cursor-pointer inline-flex items-center justify-center gap-1 shrink-0"
+                      >
+                        <History className="w-3.5 h-3.5" />
+                        <span>History</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          sounds.playClick();
+                          setSelectedManagerForHire(mgr);
+                        }}
+                        className="flex-1 py-2 min-h-11 lg:min-h-0 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-bold text-xs rounded-lg transition-all cursor-pointer active:scale-95 flex items-center justify-center gap-1.5"
+                      >
+                        <Check className="w-3.5 h-3.5" />
+                        <span>Negotiate ({mgr.name.split(' ')[0]})</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="w-full py-1.5 text-center text-xs sm:text-[10px] text-slate-500 font-mono border border-white/5 rounded-lg">
+                      Free agent · Unattached
+                    </div>
+                  )}
                 </div>
-
-                {currentClub && onHireManager ? (
-                  <button
-                    onClick={() => handleHireAvailableManager(mgr)}
-                    className="w-full py-2 min-h-11 lg:min-h-0 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-bold text-xs rounded-lg transition-all cursor-pointer active:scale-95 flex items-center justify-center gap-1.5"
-                  >
-                    <Check className="w-3.5 h-3.5" />
-                    <span>Offer Contract ({mgr.name.split(' ')[0]})</span>
-                  </button>
-                ) : (
-                  <div className="w-full py-1.5 text-center text-xs sm:text-[10px] text-slate-500 font-mono border border-white/5 rounded-lg">
-                    Free Agent · Unattached
-                  </div>
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -542,6 +599,33 @@ export const JobMarketView: React.FC<JobMarketViewProps> = ({
           </div>
         )}
       </Modal>
+
+      {currentClub && currentClubOwner && (
+        <>
+          <HireManagerModal
+            isOpen={Boolean(selectedManagerForHire)}
+            onClose={() => setSelectedManagerForHire(null)}
+            candidate={selectedManagerForHire}
+            club={currentClub}
+            allClubs={allClubs}
+            owner={currentClubOwner}
+            director={director}
+            seasonYear={seasonYear}
+            currentWeek={currentWeek}
+            onConfirmHire={handleConfirmHireFromMarket}
+          />
+          <ManagerProfileModal
+            isOpen={Boolean(profileManager)}
+            onClose={() => setProfileManager(null)}
+            manager={profileManager}
+            club={currentClub}
+            allClubs={allClubs}
+            owner={currentClubOwner}
+            initialTab="history"
+            onNegotiate={mgr => setSelectedManagerForHire(mgr)}
+          />
+        </>
+      )}
 
     </div>
   );

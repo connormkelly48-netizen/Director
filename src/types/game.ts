@@ -40,7 +40,6 @@ export interface Player {
   clubId: string | null; // null for free agents
   isInjured?: boolean;
   injuryWeeks?: number;
-  effectiveOverall?: number;
   retiringAtSeasonEnd?: boolean;
 }
 
@@ -85,6 +84,8 @@ export interface ClubData {
   fanExpectation: FanExpectation;
   ownerId: string;
   managerId: string | null;
+  managerVacancyWeeksRemaining?: number;
+  managerSacksThisSeason?: number;
 }
 
 export interface Owner {
@@ -119,6 +120,44 @@ export type TacticalStyle =
 
 export type ControlDesire = 'autocrat' | 'collaborator' | 'head_coach';
 
+export interface ManagerAttributes {
+  tactical: number; // 1 - 99
+  coaching: number; // 1 - 99
+  manManagement: number; // 1 - 99
+  youthDevelopment: number; // 1 - 99
+}
+
+export type ManagerMilestoneType =
+  | 'appointed'
+  | 'sacked'
+  | 'poached'
+  | 'league_title'
+  | 'promotion'
+  | 'relegation'
+  | 'wins_milestone'
+  | 'matches_milestone';
+
+export interface ManagerHistoryEntry {
+  id: string;
+  season: number;
+  week: number;
+  type: ManagerMilestoneType;
+  title: string;
+  detail: string;
+  clubId: string | null;
+  clubName: string;
+}
+
+export interface ManagerCareerStats {
+  matchesManaged: number;
+  wins: number;
+  draws: number;
+  losses: number;
+  titlesWon: number;
+  promotionsWon: number;
+  timesSacked: number;
+}
+
 export interface Manager {
   id: string;
   name: string;
@@ -129,8 +168,12 @@ export interface Manager {
   controlDesire: ControlDesire;
   reputation: number; // 1 - 100
   trustInDirector: number; // 0 - 100
-  wage: number; // £/week
-  contractYears: number;
+  wage: number; // £/week demand
+  seasonsAtClub: number; // Full seasons of tenure at current club
+  attributes: ManagerAttributes;
+  careerStats?: ManagerCareerStats;
+  history?: ManagerHistoryEntry[];
+  contractYears?: number; // Legacy save compatibility only; managers have no contracts
   clubId: string | null; // null = free agent
   profileSnippet: string;
   leagueLevel?: 1 | 2 | 3;
@@ -154,7 +197,19 @@ export interface AcademyPlayer {
   age: number; // 15 - 18
   position: PlayerPosition;
   roleDetail: string;
-  overall: number; // 46 - 72
+  overall: number; // 40 - 99
+  origin?: 'generated' | 'poached';
+  growthMomentum?: GrowthMomentum;
+  value?: number;
+  wage?: number;
+  contractYears?: number;
+  form?: number;
+  happiness?: number;
+  morale?: MoraleLevel;
+  goals?: number;
+  assists?: number;
+  appearances?: number;
+  cleanSheets?: number;
   momentumTier: MomentumTier;
   trait: ProspectTrait;
   scoutReport: string;
@@ -320,6 +375,32 @@ export interface WeeklyDigest {
   matchTeamRating?: number;
   lineupNotices?: string[];
   academyWire?: AcademyWireEvent[];
+  delegationNote?: string;
+  delegationTrustDelta?: number;
+  ownerInterventionNote?: string;
+}
+
+export interface PlayerStyleFit {
+  score: number;
+  label: 'Ideal Fit' | 'Strong Fit' | 'Neutral' | 'Misfit';
+  reason: string;
+  matchBonus: number;
+  formBias: number;
+}
+
+export interface OwnerAlignmentResult {
+  status: 'aligned' | 'caution' | 'mismatch';
+  approvalDelta: number;
+  trustDelta: number;
+  oneLineExplanation: string;
+}
+
+export interface DirectorGradeFactor {
+  id: 'league' | 'roi' | 'finances' | 'academy' | 'trust';
+  label: string;
+  score: number;
+  weight: number;
+  detail: string;
 }
 
 export interface IncomingBid {
@@ -367,6 +448,7 @@ export interface JobVacancy {
   ownerName: string;
   ownerPatience: OwnerPatience;
   reputationRequired: number;
+  lockReason?: string;
 }
 
 export interface SeasonAward {
@@ -425,6 +507,10 @@ export interface SeasonSummary {
   retirements?: RetirementRecord[];
   totalLeaguePromotions?: number;
   topLeagueGraduates?: SeasonGraduateHighlight[];
+  gradeBreakdown?: DirectorGradeFactor[];
+  transferRoiDelta?: number;
+  netSpendSeason?: number;
+  academyPromotionsSeason?: number;
 }
 
 export interface GameweekStandingsEntry {
@@ -489,13 +575,235 @@ export interface TransferProposal {
   expiresWeek: number;
 }
 
+export type GameMode = 'director' | 'manager';
+
+export type DirectorPersonality = 'hands_off' | 'collaborative' | 'independent' | 'dictator';
+
+export interface ClubDirector {
+  id: string;
+  clubId: string;
+  name: string;
+  nationality: string;
+  age: number;
+  personality: DirectorPersonality;
+  philosophy: RecruitmentPhilosophy;
+  signingBias: 'youth' | 'prime' | 'value' | 'stars';
+}
+
+export interface ManagerModeProfile {
+  id: string;
+  name: string;
+  nationality: string;
+  age: number;
+  startingAge: number;
+  tacticalStyle: TacticalStyle;
+  preferredFormation: FormationId;
+  reputation: number; // 0 - 100
+  trophiesWon: string[];
+  wins: number;
+  draws: number;
+  losses: number;
+  seasonsManaged: number;
+  careerSackings: number;
+}
+
+export interface ManagerJobOffer {
+  id: string;
+  clubId: string;
+  clubName: string;
+  clubTier: LeagueTier;
+  clubPrestige: number;
+  primaryColor: string;
+  expectation: string;
+  patience: Owner['patience'];
+  directorName: string;
+  directorPersonality: DirectorPersonality;
+  effectiveControl: number;
+  transferBudget: number;
+  wageBudget: number;
+  squadSize: number;
+  leaguePosition: number;
+  offeredContractYears?: number;
+  offeredWeeklyWage?: number;
+  reason: string;
+  isEmergencyOffer?: boolean;
+}
+
+export interface ManagerSeasonTableRow {
+  clubId: string;
+  name: string;
+  shortName: string;
+  primaryColor: string;
+  played: number;
+  won: number;
+  drawn: number;
+  lost: number;
+  goalsFor: number;
+  goalsAgainst: number;
+  goalDifference: number;
+  points: number;
+}
+
+export interface ManagerKeyResult {
+  week: number;
+  opponentName: string;
+  opponentId: string;
+  isHome: boolean;
+  goalsFor: number;
+  goalsAgainst: number;
+  outcome: 'W' | 'D' | 'L';
+  label: string;
+}
+
+export interface ManagerSeasonReview {
+  finalTable: ManagerSeasonTableRow[];
+  keyResults: ManagerKeyResult[];
+  topScorer: {
+    name: string;
+    position: PlayerPosition;
+    goals: number;
+    assists: number;
+    appearances: number;
+  } | null;
+  bestMoment: string;
+  worstMoment: string;
+  directorTransfers: TransferRecord[];
+  reputationBefore: number;
+  reputationAfter: number;
+  reputationDelta: number;
+  reputationReasons: string[];
+  boardVerdict: string;
+}
+
+export interface ManagerSeasonRecord {
+  seasonYear: number;
+  age: number;
+  clubId: string;
+  clubName: string;
+  clubShortName: string;
+  clubTier: LeagueTier;
+  primaryColor: string;
+  leaguePosition: number;
+  totalTeams: number;
+  played: number;
+  won: number;
+  drawn: number;
+  lost: number;
+  leaguePoints: number;
+  trophiesWon: string[];
+  wasSacked: boolean;
+  review: ManagerSeasonReview;
+}
+
+export type ManagerPlayerRequestKind = 'sale' | 'renewal';
+export type ManagerPlayerRequestStatus = 'pending' | 'accepted' | 'ignored';
+
+export interface ManagerPlayerRequest {
+  id: string;
+  playerId: string;
+  playerName: string;
+  kind: ManagerPlayerRequestKind;
+  status: ManagerPlayerRequestStatus;
+  seasonYear: number;
+  windowKey: string;
+  week: number;
+  message: string;
+}
+
+export type DirectorRequestType =
+  | 'more_power'
+  | 'less_power'
+  | 'pay_rise'
+  | 'new_contract'
+  | 'transfer_budget'
+  | 'public_backing'
+  | 'mutual_termination';
+
+export type DirectorRequestStatus =
+  | 'accepted'
+  | 'rejected'
+  | 'counter_offer'
+  | 'counter_accepted'
+  | 'counter_declined';
+
+export interface DirectorRequestRecord {
+  id: string;
+  type: DirectorRequestType;
+  status: DirectorRequestStatus;
+  seasonYear: number;
+  week: number;
+  message: string;
+}
+
+export interface DirectorCounterOffer {
+  requestId: string;
+  requestType: 'pay_rise' | 'new_contract';
+  proposedWeeklyWage: number;
+  proposedContractYears: number;
+  message: string;
+  seasonYear: number;
+  week: number;
+}
+
+export interface ManagerContractRenewalOffer {
+  offered: boolean;
+  contractYears: number;
+  weeklyWage: number;
+  reason: string;
+}
+
+export interface ManagerCareerState {
+  profile: ManagerModeProfile;
+  currentClubId: string | null;
+  contractYears: number; // Fixed 1-5 year contract while employed, 0 when free agent
+  weeklyWage: number; // £/week while employed, 0 when free agent
+  boardTrust: number;
+  fanApproval: number;
+  previousSeasonFinish: {
+    clubId: string;
+    tier: LeagueTier;
+    position: number;
+  } | null;
+  clubDirectors: Record<string, ClubDirector>;
+  seasonHistory: ManagerSeasonRecord[];
+  activeOffers: ManagerJobOffer[];
+  playerRequests?: ManagerPlayerRequest[];
+  controlModifier?: number;
+  directorReceptivityPenalty?: number;
+  directorRequestCooldowns?: Partial<Record<DirectorRequestType, number>>;
+  directorRequestHistory?: DirectorRequestRecord[];
+  pendingDirectorCounterOffer?: DirectorCounterOffer | null;
+  publicBackingWeeksRemaining?: number;
+  sackedBanner?: {
+    clubId: string;
+    clubName: string;
+    reason: string;
+    week: number;
+    compensation?: number;
+  } | null;
+  pendingSeasonEnd?: {
+    summary: SeasonSummary;
+    record: ManagerSeasonRecord;
+    offers: ManagerJobOffer[];
+    mortalityTriggered: boolean;
+    mortalityChance: number;
+    contractExpired?: boolean;
+    renewalOffer?: ManagerContractRenewalOffer;
+  } | null;
+  isRetired: boolean;
+  retirementCause?: 'voluntary' | 'age_mortality';
+  retiredYear?: number;
+}
+
 export interface GameState {
   saveVersion: number;
+  gameMode?: GameMode;
   clubs: Club[];
   owners: Owner[];
   managers: Manager[];
   freeAgents: Player[];
   director: Director | null;
+  managerCareer?: ManagerCareerState | null;
   currentWeek: number;
   seasonYear: number;
   gameweekHistory: GameweekRecord[];

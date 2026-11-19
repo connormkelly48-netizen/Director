@@ -94,56 +94,103 @@ export function useOnlineStatus() {
   return isOnline;
 }
 
+interface PWAInstallState {
+  deferredPrompt: BeforeInstallPromptEvent | null;
+  isInstalled: boolean;
+  isIOS: boolean;
+}
+
+const getInitialStandalone = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  return (
+    window.matchMedia('(display-mode: standalone)').matches ||
+    (window.navigator as unknown as { standalone?: boolean }).standalone === true
+  );
+};
+
+const getIsIOSDevice = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  return /iphone|ipad|ipod/.test(window.navigator.userAgent.toLowerCase());
+};
+
+let installState: PWAInstallState = {
+  deferredPrompt: null,
+  isInstalled: getInitialStandalone(),
+  isIOS: getIsIOSDevice(),
+};
+
+const installListeners = new Set<(state: PWAInstallState) => void>();
+
+function emitInstallState() {
+  const snapshot = { ...installState };
+  for (const listener of installListeners) {
+    listener(snapshot);
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeinstallprompt', (e: Event) => {
+    e.preventDefault();
+    installState = {
+      ...installState,
+      deferredPrompt: e as BeforeInstallPromptEvent,
+    };
+    emitInstallState();
+  });
+
+  window.addEventListener('appinstalled', () => {
+    installState = {
+      ...installState,
+      isInstalled: true,
+      deferredPrompt: null,
+    };
+    emitInstallState();
+  });
+
+  const mediaQuery = window.matchMedia('(display-mode: standalone)');
+  const onDisplayModeChange = (e: MediaQueryListEvent) => {
+    if (e.matches && !installState.isInstalled) {
+      installState = { ...installState, isInstalled: true, deferredPrompt: null };
+      emitInstallState();
+    }
+  };
+  if (typeof mediaQuery.addEventListener === 'function') {
+    mediaQuery.addEventListener('change', onDisplayModeChange);
+  }
+}
+
 export function usePWAInstall() {
-  const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
-  const [isInstalled, setIsInstalled] = useState(false);
-  const [isIOS, setIsIOS] = useState(false);
+  const [state, setState] = useState<PWAInstallState>(() => ({ ...installState }));
 
   useEffect(() => {
-    const isStandalone =
-      window.matchMedia('(display-mode: standalone)').matches ||
-      (window.navigator as unknown as { standalone?: boolean }).standalone === true;
-    setIsInstalled(isStandalone);
-
-    const userAgent = window.navigator.userAgent.toLowerCase();
-    const isIOSDevice = /iphone|ipad|ipod/.test(userAgent);
-    setIsIOS(isIOSDevice);
-
-    const handleBeforeInstallPrompt = (e: Event) => {
-      e.preventDefault();
-      setDeferredPrompt(e as BeforeInstallPromptEvent);
-    };
-
-    const handleAppInstalled = () => {
-      setIsInstalled(true);
-      setDeferredPrompt(null);
-    };
-
-    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-    window.addEventListener('appinstalled', handleAppInstalled);
-
+    setState({ ...installState });
+    installListeners.add(setState);
     return () => {
-      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-      window.removeEventListener('appinstalled', handleAppInstalled);
+      installListeners.delete(setState);
     };
   }, []);
 
   const install = async () => {
-    if (!deferredPrompt) return false;
-    await deferredPrompt.prompt();
-    const { outcome } = await deferredPrompt.userChoice;
+    const promptEvent = installState.deferredPrompt;
+    if (!promptEvent) return false;
+    await promptEvent.prompt();
+    const { outcome } = await promptEvent.userChoice;
     if (outcome === 'accepted') {
-      setIsInstalled(true);
-      setDeferredPrompt(null);
+      installState = {
+        ...installState,
+        isInstalled: true,
+        deferredPrompt: null,
+      };
+      emitInstallState();
       return true;
     }
     return false;
   };
 
   return {
-    isInstallable: Boolean(deferredPrompt),
-    isInstalled,
-    isIOS,
+    isInstallable: Boolean(state.deferredPrompt),
+    isInstalled: state.isInstalled,
+    isIOS: state.isIOS,
     install,
   };
 }

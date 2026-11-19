@@ -4,11 +4,20 @@
  */
 
 import React, { useState, useMemo, useCallback, useEffect } from 'react';
-import { Club, Player, PlayerPosition, POSITION_ORDER, IncomingBid, Manager, DelegationMatrix, Lineup, SlotRole } from '../types/game';
-import { Trash2, Tag, Send, Filter, ArrowUp, ArrowDown, ChevronDown, ChevronUp, RotateCcw, Coins, AlertTriangle, Check, Info } from 'lucide-react';
+import { Club, DirectorPersonality, GameMode, Player, PlayerPosition, PlayerStyleFit, POSITION_ORDER, IncomingBid, Manager, ManagerPlayerRequest, DelegationMatrix, Lineup, SlotRole, TacticalStyle } from '../types/game';
+import { Trash2, Tag, Send, Filter, ArrowUp, ArrowDown, ChevronDown, ChevronUp, RotateCcw, Coins, AlertTriangle, Check, Info, RefreshCw } from 'lucide-react';
 import { sounds } from '../services/soundEffects';
 import { Modal } from './ui/Modal';
-import { getTransferOffers, evaluateDirectorSaleDelegation, GeneratedTransferOffer, DelegationDecisionCheck } from '../services/transferService';
+import {
+  getTransferOffers,
+  evaluateDirectorSaleDelegation,
+  evaluatePlayerStyleFit,
+  isTransferWindowOpen,
+  getTransferWindowLabel,
+  GeneratedTransferOffer,
+  DelegationDecisionCheck,
+} from '../services/transferService';
+import { getManagerRequestWindowKey } from '../services/managerModeService';
 import { autoPickLineup, getDefaultFormation, sanitizeLineup } from '../utils/lineup';
 import { FORMATIONS } from '../data/formations';
 import { PitchView } from './squad/PitchView';
@@ -16,25 +25,51 @@ import { PlayerSheet } from './squad/PlayerSheet';
 
 const VIEW_MODE_STORAGE_KEY = 'boardroom_squad_view_mode';
 
+const MANAGER_TACTICAL_STYLES: TacticalStyle[] = [
+  'High Gegenpress',
+  'Tiki-Taka Possession',
+  'Direct Counter-Attack',
+  'Pragmatic Low Block',
+  'Fluid Wing Play',
+];
+
 interface SquadViewProps {
+  gameMode?: GameMode;
   club: Club;
   allClubs?: Club[];
   manager?: Manager;
   delegation?: DelegationMatrix;
+  seasonYear?: number;
+  currentWeek?: number;
+  tacticalStyle?: TacticalStyle;
+  directorPersonality?: DirectorPersonality;
+  effectiveControl?: number;
+  playerRequests?: ManagerPlayerRequest[];
+  onChangeTacticalStyle?: (style: TacticalStyle) => void;
   onUpdateSquad: (updatedSquad: Player[], updatedClub: Club) => void;
   onUpdateLineup?: (clubId: string, lineup: Lineup) => void;
   onSellPlayer?: (player: Player, buyingClub: Club, fee: number, wage: number, trustDelta?: number) => void;
   onReleasePlayer?: (player: Player, severance: number) => void;
   onOfferPlayerToClubs?: (playerId: string, askingPrice: number) => IncomingBid[];
+  onRequestSale?: (player: Player) => void;
+  onRequestRenewal?: (player: Player) => void;
 }
 
 interface SquadItemProps {
   player: Player;
+  styleFit: PlayerStyleFit;
+  saleDisabledReason: string | null;
+  renewalDisabledReason: string | null;
+  directorControlled: boolean;
+  saleRequest?: ManagerPlayerRequest;
+  renewalRequest?: ManagerPlayerRequest;
   onInspect: (player: Player) => void;
   onOffer: (player: Player) => void;
   onSell: (player: Player) => void;
   onRenew: (player: Player) => void;
   onRelease: (player: Player) => void;
+  onRequestSale?: (player: Player) => void;
+  onRequestRenewal?: (player: Player) => void;
 }
 
 interface SquadMobileCardProps extends SquadItemProps {
@@ -67,8 +102,44 @@ const getMomentumColorClass = (momentum: Player['growthMomentum']) => {
   }
 };
 
+const getStyleFitBadgeClass = (label: PlayerStyleFit['label']) => {
+  switch (label) {
+    case 'Ideal Fit':
+      return 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30';
+    case 'Strong Fit':
+      return 'bg-sky-500/15 text-sky-300 border-sky-500/30';
+    case 'Misfit':
+      return 'bg-rose-500/15 text-rose-300 border-rose-500/30';
+    default:
+      return 'bg-slate-800 text-slate-300 border-white/10';
+  }
+};
+
+const getRequestBadgeClass = (status: ManagerPlayerRequest['status']) => {
+  switch (status) {
+    case 'accepted':
+      return 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30';
+    case 'ignored':
+      return 'bg-rose-500/15 text-rose-300 border-rose-500/30';
+    default:
+      return 'bg-amber-400/15 text-amber-300 border-amber-400/30';
+  }
+};
+
+const formatRequestStatusLabel = (status: ManagerPlayerRequest['status']) => {
+  if (status === 'accepted') return 'Accepted';
+  if (status === 'ignored') return 'Ignored';
+  return 'Pending';
+};
+
 const SquadMobileCard = React.memo<SquadMobileCardProps>(({
   player,
+  styleFit,
+  saleDisabledReason,
+  renewalDisabledReason,
+  directorControlled,
+  saleRequest,
+  renewalRequest,
   isExpanded,
   onToggleExpand,
   onInspect,
@@ -76,6 +147,8 @@ const SquadMobileCard = React.memo<SquadMobileCardProps>(({
   onSell,
   onRenew,
   onRelease,
+  onRequestSale,
+  onRequestRenewal,
 }) => (
   <div className="bg-[#111827] border border-white/10 rounded-xl overflow-hidden">
     <button
@@ -112,6 +185,41 @@ const SquadMobileCard = React.memo<SquadMobileCardProps>(({
             <ChevronDown className="w-4 h-4 text-slate-400" />
           )}
         </div>
+      </div>
+
+      <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+        <span
+          title={styleFit.reason}
+          className={`px-2 py-0.5 rounded border text-[11px] font-semibold ${getStyleFitBadgeClass(styleFit.label)}`}
+        >
+          {styleFit.label}
+        </span>
+        {player.isInjured && (
+          <span className="px-2 py-0.5 rounded border border-rose-500/30 bg-rose-500/15 text-rose-300 text-[11px] font-semibold">
+            Injured ({player.injuryWeeks ?? 1}w)
+          </span>
+        )}
+        {player.retiringAtSeasonEnd && (
+          <span className="px-2 py-0.5 rounded border border-amber-500/30 bg-amber-500/15 text-amber-300 text-[11px] font-semibold">
+            Retiring
+          </span>
+        )}
+        {directorControlled && saleRequest && (
+          <span
+            title={saleRequest.message}
+            className={`px-2 py-0.5 rounded border text-[11px] font-semibold ${getRequestBadgeClass(saleRequest.status)}`}
+          >
+            Sale: {formatRequestStatusLabel(saleRequest.status)}
+          </span>
+        )}
+        {directorControlled && renewalRequest && (
+          <span
+            title={renewalRequest.message}
+            className={`px-2 py-0.5 rounded border text-[11px] font-semibold ${getRequestBadgeClass(renewalRequest.status)}`}
+          >
+            Renewal: {formatRequestStatusLabel(renewalRequest.status)}
+          </span>
+        )}
       </div>
 
       <div className="grid grid-cols-3 gap-2 mt-3 pt-3 border-t border-white/5 text-xs font-mono">
@@ -158,6 +266,9 @@ const SquadMobileCard = React.memo<SquadMobileCardProps>(({
             {player.isInjured ? 'Injured' : 'Fit'} · {player.happiness}%
           </span>
         </div>
+        <div className="col-span-2 text-slate-300 font-sans text-[11px] bg-slate-950/50 border border-white/5 rounded-lg px-2.5 py-2">
+          <strong className="text-white">Tactical Fit ({styleFit.score}/100):</strong> {styleFit.reason}
+        </div>
         <div className="col-span-2 pt-1">
           <button
             type="button"
@@ -172,38 +283,77 @@ const SquadMobileCard = React.memo<SquadMobileCardProps>(({
     )}
 
     <div className="px-4 py-3 bg-slate-900/60 border-t border-white/5 grid grid-cols-2 gap-2">
-      <button
-        type="button"
-        onClick={() => onSell(player)}
-        className="min-h-11 px-3 py-2 text-xs font-bold bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-emerald-300 rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95"
-      >
-        <Coins className="w-3.5 h-3.5" />
-        <span>Sell</span>
-      </button>
-      <button
-        type="button"
-        onClick={() => onOffer(player)}
-        className="min-h-11 px-3 py-2 text-xs font-bold bg-amber-400/10 hover:bg-amber-400/20 border border-amber-400/30 text-amber-300 rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95"
-      >
-        <Tag className="w-3.5 h-3.5" />
-        <span>Offer</span>
-      </button>
-      <button
-        type="button"
-        onClick={() => onRenew(player)}
-        className="min-h-11 px-3 py-2 text-xs font-bold bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-slate-200 hover:text-white transition-all cursor-pointer active:scale-95"
-      >
-        Renew
-      </button>
-      <button
-        type="button"
-        onClick={() => onRelease(player)}
-        aria-label={`Release ${player.name}`}
-        className="min-h-11 px-3 py-2 flex items-center justify-center gap-1.5 text-xs font-semibold text-rose-400 hover:text-rose-300 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/20 rounded-lg transition-all cursor-pointer active:scale-95"
-      >
-        <Trash2 className="w-3.5 h-3.5" />
-        <span>Release</span>
-      </button>
+      {directorControlled ? (
+        <>
+          <button
+            type="button"
+            disabled={Boolean(saleDisabledReason || saleRequest || !onRequestSale)}
+            title={
+              saleRequest
+                ? `Sale request already ${saleRequest.status} this window`
+                : (saleDisabledReason ?? 'Request sale from Sporting Director')
+            }
+            onClick={() => onRequestSale?.(player)}
+            className="min-h-11 px-3 py-2 text-xs font-bold bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-emerald-300 rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95 disabled:opacity-45 disabled:cursor-not-allowed"
+          >
+            <Coins className="w-3.5 h-3.5 shrink-0" />
+            <span>Request sale</span>
+          </button>
+          <button
+            type="button"
+            disabled={Boolean(renewalDisabledReason || renewalRequest || !onRequestRenewal)}
+            title={
+              renewalRequest
+                ? `Renewal request already ${renewalRequest.status} this window`
+                : (renewalDisabledReason ?? 'Request contract renewal from Sporting Director')
+            }
+            onClick={() => onRequestRenewal?.(player)}
+            className="min-h-11 px-3 py-2 text-xs font-bold bg-amber-400/15 hover:bg-amber-400/25 border border-amber-400/35 text-amber-300 rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95 disabled:opacity-45 disabled:cursor-not-allowed"
+          >
+            <RefreshCw className="w-3.5 h-3.5 shrink-0" />
+            <span>Request renewal</span>
+          </button>
+        </>
+      ) : (
+        <>
+          <button
+            type="button"
+            disabled={Boolean(saleDisabledReason)}
+            title={saleDisabledReason ?? 'Sell player'}
+            onClick={() => onSell(player)}
+            className="min-h-11 px-3 py-2 text-xs font-bold bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-emerald-300 rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95 disabled:opacity-45 disabled:cursor-not-allowed"
+          >
+            <Coins className="w-3.5 h-3.5" />
+            <span>Sell</span>
+          </button>
+          <button
+            type="button"
+            disabled={Boolean(saleDisabledReason)}
+            title={saleDisabledReason ?? 'Offer player to rival clubs'}
+            onClick={() => onOffer(player)}
+            className="min-h-11 px-3 py-2 text-xs font-bold bg-amber-400/10 hover:bg-amber-400/20 border border-amber-400/30 text-amber-300 rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95 disabled:opacity-45 disabled:cursor-not-allowed"
+          >
+            <Tag className="w-3.5 h-3.5" />
+            <span>Offer</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => onRenew(player)}
+            className="min-h-11 px-3 py-2 text-xs font-bold bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-slate-200 hover:text-white transition-all cursor-pointer active:scale-95"
+          >
+            Renew
+          </button>
+          <button
+            type="button"
+            onClick={() => onRelease(player)}
+            aria-label={`Release ${player.name}`}
+            className="min-h-11 px-3 py-2 flex items-center justify-center gap-1.5 text-xs font-semibold text-rose-400 hover:text-rose-300 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/20 rounded-lg transition-all cursor-pointer active:scale-95"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            <span>Release</span>
+          </button>
+        </>
+      )}
     </div>
   </div>
 ));
@@ -211,11 +361,19 @@ SquadMobileCard.displayName = 'SquadMobileCard';
 
 const SquadTableRow = React.memo<SquadItemProps>(({
   player,
+  styleFit,
+  saleDisabledReason,
+  renewalDisabledReason,
+  directorControlled,
+  saleRequest,
+  renewalRequest,
   onInspect,
   onOffer,
   onSell,
   onRenew,
   onRelease,
+  onRequestSale,
+  onRequestRenewal,
 }) => (
   <tr
     onClick={() => onInspect(player)}
@@ -227,8 +385,24 @@ const SquadTableRow = React.memo<SquadItemProps>(({
           player.age <= 22 ? 'bg-amber-400' : player.age >= 31 ? 'bg-slate-500' : 'bg-emerald-400'
         }`} />
         <div className="min-w-0">
-          <span className="font-bold text-white block whitespace-nowrap">{player.name}</span>
-          <span className="text-xs sm:text-[10px] text-slate-400 font-mono whitespace-nowrap">{player.roleDetail}</span>
+          <div className="flex items-center gap-1.5">
+            <span className="font-bold text-white block whitespace-nowrap">{player.name}</span>
+            {player.isInjured && (
+              <span className="px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 text-[10px] font-semibold">INJ</span>
+            )}
+            {player.retiringAtSeasonEnd && (
+              <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 text-[10px] font-semibold">RET</span>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5 mt-0.5">
+            <span className="text-xs sm:text-[10px] text-slate-400 font-mono whitespace-nowrap">{player.roleDetail}</span>
+            <span
+              title={styleFit.reason}
+              className={`px-1.5 py-0.5 rounded border text-[10px] font-semibold whitespace-nowrap ${getStyleFitBadgeClass(styleFit.label)}`}
+            >
+              {styleFit.label}
+            </span>
+          </div>
         </div>
       </div>
     </td>
@@ -264,56 +438,129 @@ const SquadTableRow = React.memo<SquadItemProps>(({
       {player.goals} / {player.assists}
     </td>
     <td className="py-3 px-3 text-right" onClick={e => e.stopPropagation()}>
-      <div className="flex items-center justify-end gap-1.5">
-        <button
-          onClick={() => onSell(player)}
-          title="Sell or Release Player"
-          aria-label={`Sell ${player.name}`}
-          className="px-2.5 py-1 min-h-11 lg:min-h-0 text-xs sm:text-[11px] font-semibold bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 rounded transition-all cursor-pointer flex items-center gap-1 active:scale-95"
-        >
-          <Coins className="w-3 h-3" />
-          <span>Sell</span>
-        </button>
-        <button
-          onClick={() => onOffer(player)}
-          title="Offer to Rival Clubs / Transfer List"
-          aria-label={`Offer ${player.name} to rival clubs`}
-          className="px-2.5 py-1 min-h-11 lg:min-h-0 text-xs sm:text-[11px] font-semibold bg-amber-400/10 hover:bg-amber-400/20 border border-amber-400/30 text-amber-300 rounded transition-all cursor-pointer flex items-center gap-1 active:scale-95"
-        >
-          <Tag className="w-3 h-3" />
-          <span>Offer</span>
-        </button>
-        <button
-          onClick={() => onRenew(player)}
-          className="px-2.5 py-1 min-h-11 lg:min-h-0 text-xs sm:text-[11px] font-semibold bg-white/5 hover:bg-white/10 border border-white/10 rounded text-slate-200 hover:text-white transition-all cursor-pointer active:scale-95"
-        >
-          Renew
-        </button>
-        <button
-          onClick={() => onRelease(player)}
-          title="Release Player"
-          aria-label={`Release ${player.name}`}
-          className="p-1.5 min-h-11 min-w-11 lg:min-h-0 lg:min-w-0 flex items-center justify-center text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded transition-all cursor-pointer active:scale-95"
-        >
-          <Trash2 className="w-3.5 h-3.5" />
-        </button>
-      </div>
+      {directorControlled ? (
+        <div className="flex items-center justify-end gap-1.5">
+          {saleRequest && (
+            <span
+              title={saleRequest.message}
+              className={`px-1.5 py-0.5 rounded border text-[10px] font-semibold whitespace-nowrap ${getRequestBadgeClass(saleRequest.status)}`}
+            >
+              Sale: {formatRequestStatusLabel(saleRequest.status)}
+            </span>
+          )}
+          {renewalRequest && (
+            <span
+              title={renewalRequest.message}
+              className={`px-1.5 py-0.5 rounded border text-[10px] font-semibold whitespace-nowrap ${getRequestBadgeClass(renewalRequest.status)}`}
+            >
+              Renewal: {formatRequestStatusLabel(renewalRequest.status)}
+            </span>
+          )}
+          <button
+            type="button"
+            disabled={Boolean(saleDisabledReason || saleRequest || !onRequestSale)}
+            onClick={() => onRequestSale?.(player)}
+            title={
+              saleRequest
+                ? `Sale request already ${saleRequest.status} this window`
+                : (saleDisabledReason ?? 'Request sale from Sporting Director')
+            }
+            className="px-2.5 py-1 min-h-11 lg:min-h-0 text-xs sm:text-[11px] font-semibold bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 rounded transition-all cursor-pointer flex items-center gap-1 whitespace-nowrap active:scale-95 disabled:opacity-45 disabled:cursor-not-allowed"
+          >
+            <Coins className="w-3 h-3 shrink-0" />
+            <span>Request sale</span>
+          </button>
+          <button
+            type="button"
+            disabled={Boolean(renewalDisabledReason || renewalRequest || !onRequestRenewal)}
+            onClick={() => onRequestRenewal?.(player)}
+            title={
+              renewalRequest
+                ? `Renewal request already ${renewalRequest.status} this window`
+                : (renewalDisabledReason ?? 'Request renewal from Sporting Director')
+            }
+            className="px-2.5 py-1 min-h-11 lg:min-h-0 text-xs sm:text-[11px] font-semibold bg-amber-400/15 hover:bg-amber-400/25 border border-amber-400/30 text-amber-300 rounded transition-all cursor-pointer flex items-center gap-1 whitespace-nowrap active:scale-95 disabled:opacity-45 disabled:cursor-not-allowed"
+          >
+            <RefreshCw className="w-3 h-3 shrink-0" />
+            <span>Request renewal</span>
+          </button>
+        </div>
+      ) : (
+        <div className="flex items-center justify-end gap-1.5">
+          <button
+            disabled={Boolean(saleDisabledReason)}
+            onClick={() => onSell(player)}
+            title={saleDisabledReason ?? 'Sell or Release Player'}
+            aria-label={`Sell ${player.name}`}
+            className="px-2.5 py-1 min-h-11 lg:min-h-0 text-xs sm:text-[11px] font-semibold bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 rounded transition-all cursor-pointer flex items-center gap-1 active:scale-95 disabled:opacity-45 disabled:cursor-not-allowed"
+          >
+            <Coins className="w-3 h-3" />
+            <span>Sell</span>
+          </button>
+          <button
+            disabled={Boolean(saleDisabledReason)}
+            onClick={() => onOffer(player)}
+            title={saleDisabledReason ?? 'Offer to Rival Clubs / Transfer List'}
+            aria-label={`Offer ${player.name} to rival clubs`}
+            className="px-2.5 py-1 min-h-11 lg:min-h-0 text-xs sm:text-[11px] font-semibold bg-amber-400/10 hover:bg-amber-400/20 border border-amber-400/30 text-amber-300 rounded transition-all cursor-pointer flex items-center gap-1 active:scale-95 disabled:opacity-45 disabled:cursor-not-allowed"
+          >
+            <Tag className="w-3 h-3" />
+            <span>Offer</span>
+          </button>
+          <button
+            onClick={() => onRenew(player)}
+            className="px-2.5 py-1 min-h-11 lg:min-h-0 text-xs sm:text-[11px] font-semibold bg-white/5 hover:bg-white/10 border border-white/10 rounded text-slate-200 hover:text-white transition-all cursor-pointer active:scale-95"
+          >
+            Renew
+          </button>
+          <button
+            onClick={() => onRelease(player)}
+            title="Release Player"
+            aria-label={`Release ${player.name}`}
+            className="p-1.5 min-h-11 min-w-11 lg:min-h-0 lg:min-w-0 flex items-center justify-center text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded transition-all cursor-pointer active:scale-95"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
     </td>
   </tr>
 ));
 SquadTableRow.displayName = 'SquadTableRow';
 
 export const SquadView: React.FC<SquadViewProps> = ({
+  gameMode = 'director',
   club,
   allClubs = [],
   manager,
   delegation,
+  seasonYear = 2026,
+  currentWeek = 1,
+  tacticalStyle,
+  directorPersonality,
+  effectiveControl = 50,
+  playerRequests = [],
+  onChangeTacticalStyle,
   onUpdateSquad,
   onUpdateLineup,
   onSellPlayer,
   onReleasePlayer,
   onOfferPlayerToClubs,
+  onRequestSale,
+  onRequestRenewal,
 }) => {
+  const isManagerMode = gameMode === 'manager';
+  const recruitmentControlledByDirector =
+    isManagerMode &&
+    Boolean(directorPersonality) &&
+    !(directorPersonality === 'hands_off' && effectiveControl >= 85);
+  const windowOpen = isTransferWindowOpen(currentWeek);
+  const windowLabel = getTransferWindowLabel(currentWeek);
+  const currentWindowKey = getManagerRequestWindowKey(seasonYear, currentWeek);
+  const windowPlayerRequests = useMemo(
+    () => playerRequests.filter(r => r.windowKey === currentWindowKey),
+    [playerRequests, currentWindowKey]
+  );
   const [viewMode, setViewMode] = useState<'pitch' | 'table'>(() => {
     try {
       const saved = localStorage.getItem(VIEW_MODE_STORAGE_KEY);
@@ -487,11 +734,16 @@ export const SquadView: React.FC<SquadViewProps> = ({
   }, []);
 
   const handleOpenRenew = useCallback((p: Player) => {
+    if (recruitmentControlledByDirector) {
+      sounds.playCrisis();
+      setFeedback('Contract renewals are managed by your AI Sporting Director.');
+      return;
+    }
     sounds.playClick();
     setSelectedPlayer(p);
     setRenewWage(Math.round(p.wage * 1.15));
     setRenewYears(Math.min(5, p.contractYears + 2));
-  }, []);
+  }, [recruitmentControlledByDirector]);
 
   const handleConfirmRenew = () => {
     if (!selectedPlayer) return;
@@ -523,6 +775,11 @@ export const SquadView: React.FC<SquadViewProps> = ({
   };
 
   const handleReleasePlayer = useCallback((p: Player) => {
+    if (recruitmentControlledByDirector) {
+      sounds.playCrisis();
+      setFeedback('Player releases and squad outgoings are controlled by your AI Sporting Director.');
+      return;
+    }
     sounds.playCrisis();
     const severance = p.wage * 26; // Half a year severance
     if (onReleasePlayer) {
@@ -540,18 +797,44 @@ export const SquadView: React.FC<SquadViewProps> = ({
     setSelectedPlayer(curr => (curr?.id === p.id ? null : curr));
     setSellModalPlayer(curr => (curr?.id === p.id ? null : curr));
     setPendingSaleConfirm(null);
-  }, [club, onReleasePlayer, onUpdateSquad]);
+  }, [club, onReleasePlayer, onUpdateSquad, recruitmentControlledByDirector]);
+
+  const getMarketSaleDisabledReason = useCallback((p: Player): string | null => {
+    if (!windowOpen) return 'Transfer window is closed (open Weeks 1-6 and 20-24).';
+    if (p.isInjured) return `${p.name} is injured and cannot be sold or offered.`;
+    if (p.retiringAtSeasonEnd) return `${p.name} is retiring at season end and cannot be transferred.`;
+    return null;
+  }, [windowOpen]);
+
+  const getRenewalDisabledReason = useCallback((p: Player): string | null => {
+    if (p.retiringAtSeasonEnd) return `${p.name} is retiring at season end and cannot extend.`;
+    if (p.contractYears >= 5) return `${p.name} is already on a maximum 5-year deal.`;
+    return null;
+  }, []);
+
+  const getSaleDisabledReason = useCallback((p: Player): string | null => {
+    if (recruitmentControlledByDirector) {
+      return 'Transfers & outgoings are controlled by your AI Sporting Director.';
+    }
+    return getMarketSaleDisabledReason(p);
+  }, [recruitmentControlledByDirector, getMarketSaleDisabledReason]);
 
   const handleOpenSellModal = useCallback((p: Player) => {
+    const blocked = getSaleDisabledReason(p);
+    if (blocked) {
+      sounds.playCrisis();
+      setFeedback(blocked);
+      return;
+    }
     sounds.playClick();
     setSellModalPlayer(p);
     setPendingSaleConfirm(null);
-  }, []);
+  }, [getSaleDisabledReason]);
 
   const sellModalOffers = useMemo(() => {
-    if (!sellModalPlayer || allClubs.length === 0) return [];
+    if (!sellModalPlayer || allClubs.length === 0 || !windowOpen) return [];
     return getTransferOffers(sellModalPlayer, allClubs, club.id);
-  }, [sellModalPlayer, allClubs, club.id]);
+  }, [sellModalPlayer, allClubs, club.id, windowOpen]);
 
   const executeDirectSale = (player: Player, offer: GeneratedTransferOffer, trustDelta: number) => {
     if (!onSellPlayer) return;
@@ -567,6 +850,13 @@ export const SquadView: React.FC<SquadViewProps> = ({
 
   const handleAttemptAcceptOffer = (offer: GeneratedTransferOffer) => {
     if (!sellModalPlayer) return;
+    const blocked = getSaleDisabledReason(sellModalPlayer);
+    if (blocked) {
+      sounds.playCrisis();
+      setFeedback(blocked);
+      setSellModalPlayer(null);
+      return;
+    }
     sounds.playClick();
 
     if (!delegation) {
@@ -584,13 +874,26 @@ export const SquadView: React.FC<SquadViewProps> = ({
   };
 
   const handleOpenOfferToClubs = useCallback((p: Player) => {
+    const blocked = getSaleDisabledReason(p);
+    if (blocked) {
+      sounds.playCrisis();
+      setFeedback(blocked);
+      return;
+    }
     sounds.playClick();
     setOfferingPlayer(p);
     setAskingPrice(p.value);
-  }, []);
+  }, [getSaleDisabledReason]);
 
   const handleConfirmOfferToClubs = () => {
     if (!offeringPlayer) return;
+    const blocked = getSaleDisabledReason(offeringPlayer);
+    if (blocked) {
+      sounds.playCrisis();
+      setFeedback(blocked);
+      setOfferingPlayer(null);
+      return;
+    }
     sounds.playGavel();
 
     if (!onOfferPlayerToClubs) {
@@ -643,12 +946,58 @@ export const SquadView: React.FC<SquadViewProps> = ({
           <h1 className="text-lg sm:text-xl font-extrabold text-white tracking-tight leading-tight">
             First-Team Squad
           </h1>
-          <div className="flex items-center gap-2 text-xs text-slate-400 font-mono tabular-nums mt-0.5">
+          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400 font-mono tabular-nums mt-0.5">
             <span className="text-slate-200 font-semibold">Squad {club.squad.length}/25</span>
             <span aria-hidden="true">·</span>
             <span className="text-emerald-400 font-semibold">£{(currentWages / 1000).toFixed(0)}k/wk</span>
+            <span aria-hidden="true">·</span>
+            <span
+              className={`px-2 py-0.5 rounded border text-[11px] font-semibold ${
+                windowOpen
+                  ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
+                  : 'bg-slate-900 border-white/10 text-slate-400'
+              }`}
+            >
+              {windowLabel}
+            </span>
           </div>
         </div>
+
+        {/* Manager Mode: 5 Tactical Style Presets Bar */}
+        {isManagerMode && onChangeTacticalStyle && (
+          <div className="bg-[#111827] border border-white/10 rounded-xl p-3 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs font-bold uppercase tracking-wider text-amber-400">
+                Match Tactical Style
+              </span>
+              <span className="text-[11px] text-slate-400">
+                Shapes player tactical fit & match engine simulation
+              </span>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+              {MANAGER_TACTICAL_STYLES.map(style => {
+                const active = (tacticalStyle || manager?.tacticalStyle) === style;
+                return (
+                  <button
+                    key={style}
+                    type="button"
+                    onClick={() => {
+                      sounds.playClick();
+                      onChangeTacticalStyle(style);
+                    }}
+                    className={`min-h-11 lg:min-h-0 px-3 py-2 rounded-lg border text-xs font-bold transition-all cursor-pointer ${
+                      active
+                        ? 'bg-amber-400 text-slate-950 border-amber-400 shadow-sm'
+                        : 'bg-slate-900/80 border-white/10 text-slate-300 hover:text-white hover:border-white/25'
+                    }`}
+                  >
+                    {style}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Full-width 44px Pitch | Table segmented control on its own row */}
         <div
@@ -702,12 +1051,17 @@ export const SquadView: React.FC<SquadViewProps> = ({
         <PitchView
           club={club}
           manager={manager}
+          currentWeek={currentWeek}
           lineup={resolvedLineup}
+          directorControlled={recruitmentControlledByDirector}
+          windowPlayerRequests={windowPlayerRequests}
           onChangeLineup={commitLineup}
           onSell={handleOpenSellModal}
           onOffer={handleOpenOfferToClubs}
           onRenew={handleOpenRenew}
           onRelease={handleReleasePlayer}
+          onRequestSale={onRequestSale}
+          onRequestRenewal={onRequestRenewal}
         />
       ) : (
         <div className="space-y-4">
@@ -810,6 +1164,16 @@ export const SquadView: React.FC<SquadViewProps> = ({
             <SquadMobileCard
               key={player.id}
               player={player}
+              styleFit={evaluatePlayerStyleFit(manager, player)}
+              saleDisabledReason={
+                recruitmentControlledByDirector
+                  ? getMarketSaleDisabledReason(player)
+                  : getSaleDisabledReason(player)
+              }
+              renewalDisabledReason={getRenewalDisabledReason(player)}
+              directorControlled={recruitmentControlledByDirector}
+              saleRequest={windowPlayerRequests.find(r => r.playerId === player.id && r.kind === 'sale')}
+              renewalRequest={windowPlayerRequests.find(r => r.playerId === player.id && r.kind === 'renewal')}
               isExpanded={expandedPlayerId === player.id}
               onToggleExpand={handleToggleExpand}
               onInspect={handleInspectPlayer}
@@ -817,6 +1181,8 @@ export const SquadView: React.FC<SquadViewProps> = ({
               onSell={handleOpenSellModal}
               onRenew={handleOpenRenew}
               onRelease={handleReleasePlayer}
+              onRequestSale={onRequestSale}
+              onRequestRenewal={onRequestRenewal}
             />
           ))}
         </div>
@@ -896,11 +1262,23 @@ export const SquadView: React.FC<SquadViewProps> = ({
                 <SquadTableRow
                   key={player.id}
                   player={player}
+                  styleFit={evaluatePlayerStyleFit(manager, player)}
+                  saleDisabledReason={
+                    recruitmentControlledByDirector
+                      ? getMarketSaleDisabledReason(player)
+                      : getSaleDisabledReason(player)
+                  }
+                  renewalDisabledReason={getRenewalDisabledReason(player)}
+                  directorControlled={recruitmentControlledByDirector}
+                  saleRequest={windowPlayerRequests.find(r => r.playerId === player.id && r.kind === 'sale')}
+                  renewalRequest={windowPlayerRequests.find(r => r.playerId === player.id && r.kind === 'renewal')}
                   onInspect={handleInspectPlayer}
                   onOffer={handleOpenOfferToClubs}
                   onSell={handleOpenSellModal}
                   onRenew={handleOpenRenew}
                   onRelease={handleReleasePlayer}
+                  onRequestSale={onRequestSale}
+                  onRequestRenewal={onRequestRenewal}
                 />
               ))}
             </tbody>
@@ -913,10 +1291,23 @@ export const SquadView: React.FC<SquadViewProps> = ({
       {/* Player Info Sheet (triggered from Table view) */}
       <PlayerSheet
         player={inspectedPlayer}
+        manager={manager}
+        windowOpen={windowOpen}
         occupancyLabel={inspectedOccupancy.label}
         slotRole={inspectedOccupancy.slotRole}
         mode="sheet"
         isOpen={Boolean(inspectedPlayer)}
+        directorControlled={recruitmentControlledByDirector}
+        saleRequest={
+          inspectedPlayer
+            ? windowPlayerRequests.find(r => r.playerId === inspectedPlayer.id && r.kind === 'sale')
+            : undefined
+        }
+        renewalRequest={
+          inspectedPlayer
+            ? windowPlayerRequests.find(r => r.playerId === inspectedPlayer.id && r.kind === 'renewal')
+            : undefined
+        }
         onClose={() => setInspectedPlayerId(null)}
         onSell={p => {
           setInspectedPlayerId(null);
@@ -934,6 +1325,8 @@ export const SquadView: React.FC<SquadViewProps> = ({
           setInspectedPlayerId(null);
           handleReleasePlayer(p);
         }}
+        onRequestSale={onRequestSale}
+        onRequestRenewal={onRequestRenewal}
       />
 
       {/* Mobile Squad Filters Sheet Modal */}

@@ -287,6 +287,13 @@ export const TransferROIModal: React.FC<TransferROIModalProps> = ({
           </div>
         </div>
 
+        {/* Link to Season Finale Director Grade */}
+        <div className="bg-amber-400/5 border border-amber-400/20 rounded-xl px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <span className="text-slate-300">
+            <strong className="text-amber-300">End-of-Season Director Grade Link (20% Weight):</strong> The board scores your 2-season collective OVR delta ({summary.collectiveOvrDelta >= 0 ? `+${summary.collectiveOvrDelta}` : summary.collectiveOvrDelta} OVR) against total fees spent ({formatTransferFee(summary.totalFeesSpent)}).
+          </span>
+        </div>
+
         {/* Chart & Filter Toolbar */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           {/* Chart Switcher */}

@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback, useEffect } from 'react';
-import { Club, Director, Owner, Manager, Player, PlayerPosition, POSITION_ORDER, DelegationMatrix, GrowthMomentum, TransferRecord, TransferProposal, IncomingBid } from '../types/game';
+import { Club, ClubDirector, Director, DirectorPersonality, GameMode, Owner, Manager, Player, PlayerPosition, PlayerStyleFit, POSITION_ORDER, DelegationMatrix, GrowthMomentum, TransferRecord, TransferProposal, IncomingBid } from '../types/game';
 import { 
   DollarSign, 
   Search, 
@@ -26,23 +26,34 @@ import {
   Eye,
   Send,
   ClipboardCheck,
-  UserCheck
+  UserCheck,
+  Briefcase
 } from 'lucide-react';
 import { sounds } from '../services/soundEffects';
 import { Modal } from './ui/Modal';
+import { MANAGER_MODE_CONFIG } from '../config/managerModeConfig';
+import type { TargetRequestOutcome } from '../services/managerModeService';
 import {
   evaluateSigning,
   completeSigning,
   evaluateDirectorSigningDelegation,
   evaluateDirectorSaleDelegation,
+  evaluatePlayerStyleFit,
+  evaluateOwnerSigningAlignment,
+  isTransferWindowOpen,
+  getTransferWindowLabel,
   DelegationDecisionCheck,
 } from '../services/transferService';
 
 interface TransfersViewProps {
+  gameMode?: GameMode;
   currentClub: Club;
   allClubs: Club[];
   freeAgents: Player[];
   director: Director;
+  clubDirector?: ClubDirector;
+  effectiveControl?: number;
+  managerReputation?: number;
   owner: Owner;
   manager: Manager | undefined;
   delegation: DelegationMatrix;
@@ -59,6 +70,7 @@ interface TransfersViewProps {
     updatedManager: Manager | undefined,
     record: TransferRecord
   ) => void;
+  onRequestTarget?: (player: Player, sellingClub: Club | null) => TargetRequestOutcome;
   onApproveProposal?: (proposalId: string) => { ok: boolean; error?: string };
   onRejectProposal?: (proposalId: string) => void;
   onAcceptBid?: (bidId: string, trustDelta?: number) => { ok: boolean; error?: string } | void;
@@ -109,11 +121,29 @@ const getMarketMomentumLabel = (momentum?: GrowthMomentum) => {
   }
 };
 
+const getStyleFitBadgeClass = (label: PlayerStyleFit['label']) => {
+  switch (label) {
+    case 'Ideal Fit':
+      return 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30';
+    case 'Strong Fit':
+      return 'bg-sky-500/15 text-sky-300 border-sky-500/30';
+    case 'Misfit':
+      return 'bg-rose-500/15 text-rose-300 border-rose-500/30';
+    default:
+      return 'bg-slate-800 text-slate-300 border-white/10';
+  }
+};
+
 interface MarketRowProps {
   player: Player;
   club: Club | null;
+  styleFit: PlayerStyleFit;
+  windowOpen: boolean;
   isAffordableFee: boolean;
   isAffordableWage: boolean;
+  isManagerMode?: boolean;
+  directorPersonality?: DirectorPersonality;
+  effectiveControl?: number;
   onNegotiate: (item: { player: Player; club: Club | null }) => void;
 }
 
@@ -125,8 +155,13 @@ interface MarketMobileCardProps extends MarketRowProps {
 const MarketMobileCard = React.memo<MarketMobileCardProps>(({
   player,
   club,
+  styleFit,
+  windowOpen,
   isAffordableFee,
   isAffordableWage,
+  isManagerMode = false,
+  directorPersonality,
+  effectiveControl = 50,
   isExpanded,
   onToggleExpand,
   onNegotiate,
@@ -175,6 +210,15 @@ const MarketMobileCard = React.memo<MarketMobileCardProps>(({
             <ChevronDown className="w-4 h-4 text-slate-400" />
           )}
         </div>
+      </div>
+
+      <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+        <span
+          title={styleFit.reason}
+          className={`px-2 py-0.5 rounded border text-[11px] font-semibold ${getStyleFitBadgeClass(styleFit.label)}`}
+        >
+          {styleFit.label} · {styleFit.score}
+        </span>
       </div>
 
       <div className="grid grid-cols-3 gap-2 mt-3 pt-3 border-t border-white/5 text-xs font-mono">
@@ -233,17 +277,34 @@ const MarketMobileCard = React.memo<MarketMobileCardProps>(({
             {isAffordableWage ? 'Within Wage Cap' : 'Exceeds Wage Cap'}
           </span>
         </div>
+        <div className="col-span-2 text-slate-300 font-sans text-[11px] bg-slate-950/50 border border-white/5 rounded-lg px-2.5 py-2">
+          <strong className="text-white">Tactical Fit:</strong> {styleFit.reason}
+        </div>
       </div>
     )}
 
     <div className="px-4 py-3 bg-slate-900/60 border-t border-white/5">
-      <button
-        type="button"
-        onClick={() => onNegotiate({ player, club })}
-        className="w-full min-h-11 px-4 py-2 text-xs font-bold bg-amber-400/15 hover:bg-amber-400/25 border border-amber-400/40 text-amber-300 rounded-lg transition-all cursor-pointer active:scale-95"
-      >
-        Approach Player
-      </button>
+      {isManagerMode && directorPersonality === 'dictator' && effectiveControl <= 0 ? (
+        <div className="text-center text-[11px] font-mono text-slate-500 py-2">
+          Dictator Sporting Director controls all signings
+        </div>
+      ) : (
+        <button
+          type="button"
+          disabled={!windowOpen}
+          title={windowOpen ? `Approach ${player.name}` : 'Transfer window closed (Weeks 1-6 & 20-24)'}
+          onClick={() => onNegotiate({ player, club })}
+          className="w-full min-h-11 px-4 py-2 text-xs font-bold bg-amber-400/15 hover:bg-amber-400/25 border border-amber-400/40 text-amber-300 rounded-lg transition-all cursor-pointer active:scale-95 disabled:opacity-45 disabled:cursor-not-allowed"
+        >
+          {!windowOpen
+            ? 'Window Closed'
+            : isManagerMode && directorPersonality === 'hands_off' && effectiveControl >= 85
+              ? 'Sign Player'
+              : isManagerMode
+                ? 'Request Target'
+                : 'Approach Player'}
+        </button>
+      )}
     </div>
   </div>
 ));
@@ -252,8 +313,13 @@ MarketMobileCard.displayName = 'MarketMobileCard';
 const MarketTableRow = React.memo<MarketRowProps>(({
   player,
   club,
+  styleFit,
+  windowOpen,
   isAffordableFee,
   isAffordableWage,
+  isManagerMode = false,
+  directorPersonality,
+  effectiveControl = 50,
   onNegotiate,
 }) => (
   <tr className="hover:bg-white/5 transition-colors group">
@@ -269,9 +335,17 @@ const MarketTableRow = React.memo<MarketRowProps>(({
           <span className="font-bold text-white block group-hover:text-amber-300 transition-colors whitespace-nowrap">
             {player.name}
           </span>
-          <span className="text-xs sm:text-[10px] text-slate-400 font-mono whitespace-nowrap">
-            {club ? club.name : 'Free Agent'} · {player.roleDetail}
-          </span>
+          <div className="flex items-center gap-1.5 mt-0.5">
+            <span className="text-xs sm:text-[10px] text-slate-400 font-mono whitespace-nowrap">
+              {club ? club.name : 'Free Agent'} · {player.roleDetail}
+            </span>
+            <span
+              title={styleFit.reason}
+              className={`px-1.5 py-0.5 rounded border text-[10px] font-semibold whitespace-nowrap ${getStyleFitBadgeClass(styleFit.label)}`}
+            >
+              {styleFit.label}
+            </span>
+          </div>
         </div>
       </div>
     </td>
@@ -328,12 +402,26 @@ const MarketTableRow = React.memo<MarketRowProps>(({
 
     {/* Approach Action Button */}
     <td className="py-3 px-3 text-right">
-      <button
-        onClick={() => onNegotiate({ player, club })}
-        className="px-3 py-1.5 min-h-11 lg:min-h-0 text-xs font-bold bg-amber-400/10 hover:bg-amber-400/20 border border-amber-400/30 text-amber-300 rounded-lg transition-all cursor-pointer whitespace-nowrap hover:scale-105 active:scale-95"
-      >
-        Approach
-      </button>
+      {isManagerMode && directorPersonality === 'dictator' && effectiveControl <= 0 ? (
+        <span className="text-[11px] font-mono text-slate-500 whitespace-nowrap">
+          Director Only
+        </span>
+      ) : (
+        <button
+          disabled={!windowOpen}
+          title={windowOpen ? `Approach ${player.name}` : 'Transfer window closed (Weeks 1-6 & 20-24)'}
+          onClick={() => onNegotiate({ player, club })}
+          className="px-3 py-1.5 min-h-11 lg:min-h-0 text-xs font-bold bg-amber-400/10 hover:bg-amber-400/20 border border-amber-400/30 text-amber-300 rounded-lg transition-all cursor-pointer whitespace-nowrap hover:scale-105 active:scale-95 disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:scale-100"
+        >
+          {!windowOpen
+            ? 'Closed'
+            : isManagerMode && directorPersonality === 'hands_off' && effectiveControl >= 85
+              ? 'Sign'
+              : isManagerMode
+                ? 'Request'
+                : 'Approach'}
+        </button>
+      )}
     </td>
   </tr>
 ));
@@ -343,6 +431,7 @@ interface BidItemProps {
   bid: IncomingBid;
   buyingClubColor: string;
   currentValue: number;
+  windowOpen: boolean;
   onReview: (bid: IncomingBid) => void;
   onAccept: (bidId: string) => void;
   onReject: (bidId: string) => void;
@@ -352,6 +441,7 @@ const IncomingBidMobileCard = React.memo<BidItemProps>(({
   bid,
   buyingClubColor,
   currentValue,
+  windowOpen,
   onReview,
   onAccept,
   onReject,
@@ -415,8 +505,10 @@ const IncomingBidMobileCard = React.memo<BidItemProps>(({
         <>
           <button
             type="button"
+            disabled={!windowOpen}
+            title={windowOpen ? 'Accept bid' : 'Transfer window closed'}
             onClick={() => onAccept(bid.id)}
-            className="flex-1 min-h-11 px-3 py-2 text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-white rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-sm active:scale-95"
+            className="flex-1 min-h-11 px-3 py-2 text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-white rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-sm active:scale-95 disabled:opacity-45 disabled:cursor-not-allowed"
           >
             <Check className="w-3.5 h-3.5" />
             <span>Accept</span>
@@ -441,6 +533,7 @@ const IncomingBidTableRow = React.memo<BidItemProps>(({
   bid,
   buyingClubColor,
   currentValue,
+  windowOpen,
   onReview,
   onAccept,
   onReject,
@@ -509,8 +602,10 @@ const IncomingBidTableRow = React.memo<BidItemProps>(({
         {bid.status === 'pending' && (
           <>
             <button
+              disabled={!windowOpen}
+              title={windowOpen ? 'Accept bid' : 'Transfer window closed'}
               onClick={() => onAccept(bid.id)}
-              className="px-2.5 py-1 min-h-11 lg:min-h-0 text-xs sm:text-[11px] font-bold bg-emerald-500 hover:bg-emerald-400 text-white rounded transition-all cursor-pointer flex items-center gap-1 shadow-sm active:scale-95"
+              className="px-2.5 py-1 min-h-11 lg:min-h-0 text-xs sm:text-[11px] font-bold bg-emerald-500 hover:bg-emerald-400 text-white rounded transition-all cursor-pointer flex items-center gap-1 shadow-sm active:scale-95 disabled:opacity-45 disabled:cursor-not-allowed"
             >
               <Check className="w-3 h-3" />
               <span>Accept</span>
@@ -540,6 +635,7 @@ interface HistoryItemProps {
   isFromMyClub: boolean;
   isToMyClub: boolean;
   managerName?: string;
+  isManagerMode?: boolean;
 }
 
 const getTypeBadgeInfo = (type: TransferRecord['type']) => {
@@ -559,7 +655,17 @@ const getTypeBadgeInfo = (type: TransferRecord['type']) => {
   }
 };
 
-const getInitiatorLabel = (initiatedBy: TransferRecord['initiatedBy'], managerName?: string) => {
+const getInitiatorLabel = (
+  initiatedBy: TransferRecord['initiatedBy'],
+  managerName?: string,
+  isManagerMode = false
+) => {
+  if (isManagerMode) {
+    if (initiatedBy === 'manager') return 'Initiated by: You (Manager)';
+    if (initiatedBy === 'shared') return 'Initiated by: Joint Agreement';
+    if (initiatedBy === 'ai') return 'Initiated by: Rival Club';
+    return 'Initiated by: Sporting Director';
+  }
   if (initiatedBy === 'manager') {
     return `Initiated by: Head Coach${managerName ? ` (${managerName})` : ''}`;
   }
@@ -589,6 +695,7 @@ const TransferHistoryMobileCard = React.memo<HistoryItemProps>(({
   isFromMyClub,
   isToMyClub,
   managerName,
+  isManagerMode = false,
 }) => {
   const typeBadge = getTypeBadgeInfo(tr.type);
   const fromLabel = formatFromLabel(tr, fromClubName);
@@ -646,7 +753,7 @@ const TransferHistoryMobileCard = React.memo<HistoryItemProps>(({
                 ? 'text-slate-400'
                 : 'text-slate-300'
         }>
-          {getInitiatorLabel(tr.initiatedBy, managerName)}
+          {getInitiatorLabel(tr.initiatedBy, managerName, isManagerMode)}
         </span>
       </div>
     </div>
@@ -663,6 +770,7 @@ const TransferHistoryTableRow = React.memo<HistoryItemProps>(({
   isFromMyClub,
   isToMyClub,
   managerName,
+  isManagerMode = false,
 }) => {
   const typeBadge = getTypeBadgeInfo(tr.type);
   const fromLabel = formatFromLabel(tr, fromClubName);
@@ -763,7 +871,7 @@ const TransferHistoryTableRow = React.memo<HistoryItemProps>(({
                 ? 'text-slate-400'
                 : 'text-slate-300'
         }>
-          {getInitiatorLabel(tr.initiatedBy, managerName)}
+          {getInitiatorLabel(tr.initiatedBy, managerName, isManagerMode)}
         </span>
       </td>
     </tr>
@@ -772,10 +880,14 @@ const TransferHistoryTableRow = React.memo<HistoryItemProps>(({
 TransferHistoryTableRow.displayName = 'TransferHistoryTableRow';
 
 export const TransfersView: React.FC<TransfersViewProps> = ({
+  gameMode = 'director',
   currentClub,
   allClubs,
   freeAgents,
   director,
+  clubDirector,
+  effectiveControl = 50,
+  managerReputation = 50,
   owner,
   manager,
   delegation,
@@ -785,14 +897,24 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
   seasonYear = 2026,
   currentWeek = 1,
   onCompleteTransfer,
+  onRequestTarget,
   onApproveProposal,
   onRejectProposal,
   onAcceptBid,
   onRejectBid,
   onOfferPlayerToClubs,
 }) => {
+  const isManagerMode = gameMode === 'manager';
+  const directorPersonality = clubDirector?.personality;
   // Main view tab: 'market' | 'history' | 'proposals'
   const [activeTab, setActiveTab] = useState<'market' | 'history' | 'proposals'>('market');
+  const [requestVerdict, setRequestVerdict] = useState<{
+    player: Player;
+    club: Club | null;
+    outcome: TargetRequestOutcome;
+  } | null>(null);
+  const windowOpen = isTransferWindowOpen(currentWeek);
+  const windowLabel = getTransferWindowLabel(currentWeek);
 
   // Proposals & Incoming Bids State
   const [proposalError, setProposalError] = useState<string | null>(null);
@@ -1004,17 +1126,19 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
   const currentWages = useMemo(() => currentClub.squad.reduce((a, b) => a + b.wage, 0), [currentClub.squad]);
   const wageSpaceRemaining = useMemo(() => Math.max(0, currentClub.wageBudget - currentWages), [currentClub.wageBudget, currentWages]);
 
-  // Gather all players across the 68 clubs + free agents
+  // Gather all healthy, non-retiring players across the 68 clubs + free agents
   const allAvailablePlayers = useMemo(() => {
     const list: Array<{ player: Player; club: Club | null }> = [];
 
     freeAgents.forEach(fa => {
+      if (fa.isInjured || fa.retiringAtSeasonEnd) return;
       list.push({ player: fa, club: null });
     });
 
     allClubs.forEach(c => {
       if (c.id === currentClub.id) return;
       c.squad.forEach(p => {
+        if (p.isInjured || p.retiringAtSeasonEnd) return;
         list.push({ player: p, club: c });
       });
     });
@@ -1251,6 +1375,40 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
   }, []);
 
   const handleOpenNegotiate = useCallback((item: { player: Player; club: Club | null }) => {
+    if (!windowOpen) {
+      sounds.playCrisis();
+      setFeedback('Transfer window is closed (open Weeks 1-6 and 20-24).');
+      return;
+    }
+    if (isManagerMode && directorPersonality === 'dictator' && effectiveControl <= 0) {
+      sounds.playCrisis();
+      setFeedback(`${clubDirector?.name || 'The Sporting Director'} operates as a Dictator and does not accept transfer requests.`);
+      return;
+    }
+    if (item.player.isInjured || item.player.retiringAtSeasonEnd) {
+      sounds.playCrisis();
+      setFeedback(
+        item.player.isInjured
+          ? `${item.player.name} is currently injured and unavailable for transfer.`
+          : `${item.player.name} is retiring at season end and cannot be transferred.`
+      );
+      return;
+    }
+    if (
+      isManagerMode &&
+      !(directorPersonality === 'hands_off' && effectiveControl >= 85) &&
+      onRequestTarget
+    ) {
+      const outcome = onRequestTarget(item.player, item.club);
+      if (outcome.accepted) {
+        sounds.playSigningStamp();
+      } else {
+        sounds.playCrisis();
+      }
+      setRequestVerdict({ player: item.player, club: item.club, outcome });
+      setFeedback(outcome.reason);
+      return;
+    }
     sounds.playClick();
     setTargetPlayer(item);
     setOfferFee(item.club ? Math.round(item.player.value * 1.05) : 0);
@@ -1260,7 +1418,7 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
     setSigningConfirmCheck(null);
     setNegotiationFeedback(null);
     setFeedback(null);
-  }, []);
+  }, [windowOpen, isManagerMode, directorPersonality, effectiveControl, clubDirector?.name, onRequestTarget]);
 
   const handleReviewBid = useCallback((bid: IncomingBid) => {
     sounds.playClick();
@@ -1278,6 +1436,11 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
   }, [onAcceptBid]);
 
   const handleAcceptBidAction = useCallback((bidId: string) => {
+    if (!windowOpen) {
+      sounds.playCrisis();
+      setProposalError('Transfer window is closed (open Weeks 1-6 and 20-24).');
+      return;
+    }
     const bid = incomingBids.find(b => b.id === bidId);
     const player = bid ? squadPlayerById.get(bid.playerId) : undefined;
     if (bid && player) {
@@ -1293,7 +1456,7 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
     }
     sounds.playSigningStamp();
     submitAcceptedBid(bidId, 0);
-  }, [incomingBids, squadPlayerById, currentClub, manager, delegation, submitAcceptedBid]);
+  }, [windowOpen, incomingBids, squadPlayerById, currentClub, manager, delegation, submitAcceptedBid]);
 
   const handleRejectBidAction = useCallback((bidId: string) => {
     sounds.playCrisis();
@@ -1303,6 +1466,11 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
   // Submit Bid to Selling Club (uses shared evaluateSigning rules for squad cap, budget, and selling club valuation)
   const handleClubBid = () => {
     if (!targetPlayer) return;
+    if (!windowOpen) {
+      sounds.playCrisis();
+      setNegotiationFeedback({ tone: 'error', text: 'Transfer window is closed (open Weeks 1-6 and 20-24).' });
+      return;
+    }
     sounds.playClick();
     const safeFee = Number.isFinite(offerFee) ? Math.max(0, offerFee) : NaN;
 
@@ -1381,7 +1549,7 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
       contractYears: offerYears,
       season: seasonYear,
       week: currentWeek,
-      initiatedBy: 'director',
+      initiatedBy: isManagerMode ? 'manager' : 'director',
       trustDelta,
     });
 
@@ -1404,6 +1572,11 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
   // Final Owner Approval & Delegation Check via shared transferService
   const handleFinalizeSigning = () => {
     if (!targetPlayer) return;
+    if (!windowOpen) {
+      sounds.playCrisis();
+      setNegotiationFeedback({ tone: 'error', text: 'Transfer window is closed (open Weeks 1-6 and 20-24).' });
+      return;
+    }
     const safeFee = Number.isFinite(offerFee) ? Math.max(0, offerFee) : NaN;
     const safeWage = Number.isFinite(offerWage) ? Math.max(0, offerWage) : NaN;
 
@@ -1426,6 +1599,12 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
     }
 
     setNegotiationFeedback(null);
+
+    if (isManagerMode && directorPersonality === 'hands_off') {
+      sounds.playSigningStamp();
+      executeCompleteSigning(0);
+      return;
+    }
 
     const delegationCheck = evaluateDirectorSigningDelegation(
       currentClub,
@@ -1464,6 +1643,14 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
+            <div className={`px-3.5 py-2 rounded-xl border text-left ${
+              windowOpen
+                ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                : 'bg-slate-900 border-white/10 text-slate-300'
+            }`}>
+              <span className="text-xs sm:text-[10px] uppercase block opacity-80">Transfer Window</span>
+              <span className="text-xs font-bold font-mono">{windowLabel}</span>
+            </div>
             <div className="px-4 py-2 bg-slate-900 border border-white/10 rounded-xl text-right">
               <span className="text-xs sm:text-[10px] text-slate-400 uppercase block">War Chest</span>
               <span className="text-lg font-bold font-mono text-amber-400 tabular-nums">
@@ -1478,6 +1665,43 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
             </div>
           </div>
         </div>
+        {isManagerMode && clubDirector && (
+          <div className="mt-4 p-3.5 rounded-xl bg-slate-900/80 border border-white/10 flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <Briefcase className="w-4 h-4 text-amber-400 shrink-0" />
+                <span className="text-xs font-bold text-white">
+                  Sporting Director: {clubDirector.name}
+                </span>
+                <span className="px-2 py-0.5 rounded bg-amber-400/15 border border-amber-400/30 text-[11px] font-bold text-amber-300">
+                  {MANAGER_MODE_CONFIG.directors[clubDirector.personality].label}
+                </span>
+                <span className="text-[11px] text-slate-400 font-mono capitalize">
+                  {clubDirector.philosophy.replace('_', ' ')}
+                </span>
+              </div>
+              <p className="text-xs text-slate-400">
+                {clubDirector.personality === 'hands_off' && effectiveControl >= 85
+                  ? 'Full signing authority granted — negotiate and sign targets directly within club budget.'
+                  : clubDirector.personality === 'dictator' && effectiveControl <= 0
+                    ? 'Head coach mandate only — target requests are disabled; your director handles recruitment autonomously.'
+                    : `Submit transfer target requests for instant director approval (${effectiveControl}% effective influence based on your ${managerReputation} rep).`}
+              </p>
+            </div>
+            <div className="shrink-0 bg-slate-950/70 border border-white/10 rounded-lg px-3 py-2 text-right font-mono">
+              <span className="text-[10px] uppercase text-slate-400 block">Effective Say</span>
+              <span className="text-sm font-extrabold text-amber-400 tabular-nums">{effectiveControl}%</span>
+            </div>
+          </div>
+        )}
+        {!windowOpen && (
+          <div className="mt-4 px-3.5 py-2.5 rounded-xl bg-slate-900/90 border border-amber-400/25 text-xs text-amber-200 flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>
+              Transfer window is closed (open Weeks 1–6 and 20–24). Scouting remains active, while new signings, proposals, and sales unlock when the next window opens.
+            </span>
+          </div>
+        )}
       </div>
 
       {feedback && (
@@ -1532,34 +1756,36 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
           )}
         </button>
 
-        <button
-          onClick={() => {
-            sounds.playClick();
-            setActiveTab('proposals');
-          }}
-          className={`px-4 py-2.5 min-h-11 lg:min-h-0 text-xs font-bold rounded-xl transition-all flex items-center gap-2 cursor-pointer whitespace-nowrap ${
-            activeTab === 'proposals'
-              ? 'bg-amber-400 text-slate-950 shadow-md shadow-amber-400/20 font-extrabold'
-              : 'bg-slate-900 text-slate-400 hover:text-white border border-white/5'
-          }`}
-        >
-          <ClipboardCheck className="w-3.5 h-3.5" />
-          <span>Proposals</span>
-          {pendingProposals.length > 0 && (
-            <span className={`text-xs sm:text-[10px] px-1.5 py-0.5 rounded-full font-mono font-bold ${
-              activeTab === 'proposals' ? 'bg-slate-950 text-amber-400' : 'bg-amber-400 text-slate-950'
-            }`}>
-              {pendingProposals.length}
-            </span>
-          )}
-          {bidsSummary.pendingCount > 0 && (
-            <span className={`text-xs sm:text-[10px] px-1.5 py-0.5 rounded-full font-mono font-bold ${
-              activeTab === 'proposals' ? 'bg-slate-950/20 text-slate-950' : 'bg-emerald-400/20 text-emerald-300'
-            }`}>
-              {bidsSummary.pendingCount} bids
-            </span>
-          )}
-        </button>
+        {!isManagerMode && (
+          <button
+            onClick={() => {
+              sounds.playClick();
+              setActiveTab('proposals');
+            }}
+            className={`px-4 py-2.5 min-h-11 lg:min-h-0 text-xs font-bold rounded-xl transition-all flex items-center gap-2 cursor-pointer whitespace-nowrap ${
+              activeTab === 'proposals'
+                ? 'bg-amber-400 text-slate-950 shadow-md shadow-amber-400/20 font-extrabold'
+                : 'bg-slate-900 text-slate-400 hover:text-white border border-white/5'
+            }`}
+          >
+            <ClipboardCheck className="w-3.5 h-3.5" />
+            <span>Proposals</span>
+            {pendingProposals.length > 0 && (
+              <span className={`text-xs sm:text-[10px] px-1.5 py-0.5 rounded-full font-mono font-bold ${
+                activeTab === 'proposals' ? 'bg-slate-950 text-amber-400' : 'bg-amber-400 text-slate-950'
+              }`}>
+                {pendingProposals.length}
+              </span>
+            )}
+            {bidsSummary.pendingCount > 0 && (
+              <span className={`text-xs sm:text-[10px] px-1.5 py-0.5 rounded-full font-mono font-bold ${
+                activeTab === 'proposals' ? 'bg-slate-950/20 text-slate-950' : 'bg-emerald-400/20 text-emerald-300'
+              }`}>
+                {bidsSummary.pendingCount} bids
+              </span>
+            )}
+          </button>
+        )}
       </div>
 
       {activeTab === 'market' && (
@@ -2070,8 +2296,13 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
                 key={player.id}
                 player={player}
                 club={club}
+                styleFit={evaluatePlayerStyleFit(manager, player)}
+                windowOpen={windowOpen}
                 isAffordableFee={club ? player.value * 0.9 <= currentClub.transferBudget : true}
                 isAffordableWage={player.wage * 0.85 <= wageSpaceRemaining}
+                isManagerMode={isManagerMode}
+                directorPersonality={directorPersonality}
+                effectiveControl={effectiveControl}
                 isExpanded={expandedMarketId === player.id}
                 onToggleExpand={handleToggleExpandMarket}
                 onNegotiate={handleOpenNegotiate}
@@ -2213,8 +2444,13 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
                     key={player.id}
                     player={player}
                     club={club}
+                    styleFit={evaluatePlayerStyleFit(manager, player)}
+                    windowOpen={windowOpen}
                     isAffordableFee={club ? player.value * 0.9 <= currentClub.transferBudget : true}
                     isAffordableWage={player.wage * 0.85 <= wageSpaceRemaining}
+                    isManagerMode={isManagerMode}
+                    directorPersonality={directorPersonality}
+                    effectiveControl={effectiveControl}
                     onNegotiate={handleOpenNegotiate}
                   />
                 ))
@@ -2359,6 +2595,8 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
                         </button>
                         <button
                           type="button"
+                          disabled={!windowOpen}
+                          title={windowOpen ? 'Approve proposal' : 'Transfer window closed'}
                           onClick={() => {
                             const res = onApproveProposal?.(prop.id);
                             if (res && !res.ok) {
@@ -2368,10 +2606,10 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
                               setProposalError(null);
                             }
                           }}
-                          className="flex-1 sm:flex-initial min-h-11 px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-extrabold flex items-center justify-center gap-1.5 cursor-pointer transition-all active:scale-95"
+                          className="flex-1 sm:flex-initial min-h-11 px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-extrabold flex items-center justify-center gap-1.5 cursor-pointer transition-all active:scale-95 disabled:opacity-45 disabled:cursor-not-allowed"
                         >
                           <Check className="w-3.5 h-3.5" />
-                          <span>Approve (+2 Trust)</span>
+                          <span>{windowOpen ? 'Approve (+2 Trust)' : 'Window Closed'}</span>
                         </button>
                       </div>
                     </div>
@@ -2533,18 +2771,21 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
                 Squad Transfer Listing
               </span>
               <button
+                disabled={!windowOpen}
+                title={windowOpen ? 'Offer a squad player to rival clubs' : 'Transfer window closed (Weeks 1-6 & 20-24)'}
                 onClick={() => {
                   sounds.playClick();
-                  if (currentClub.squad.length > 0) {
-                    setPlayerToOffer(currentClub.squad[0]);
-                    setOfferPriceInput(currentClub.squad[0].value);
+                  const eligible = currentClub.squad.filter(p => !p.isInjured && !p.retiringAtSeasonEnd);
+                  if (eligible.length > 0) {
+                    setPlayerToOffer(eligible[0]);
+                    setOfferPriceInput(eligible[0].value);
                   }
                   setShowOfferPlayerModal(true);
                 }}
-                className="w-full py-2 min-h-11 lg:min-h-0 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-bold text-xs rounded-lg shadow-sm flex items-center justify-center gap-1.5 cursor-pointer transition-all active:scale-95"
+                className="w-full py-2 min-h-11 lg:min-h-0 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-bold text-xs rounded-lg shadow-sm flex items-center justify-center gap-1.5 cursor-pointer transition-all active:scale-95 disabled:opacity-45 disabled:cursor-not-allowed"
               >
                 <Tag className="w-3.5 h-3.5" />
-                <span>Offer Player to Clubs</span>
+                <span>{windowOpen ? 'Offer Player to Clubs' : 'Window Closed'}</span>
               </button>
             </div>
           </div>
@@ -2589,18 +2830,21 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
                 No rival clubs have currently submitted offers matching this filter. Go to the <strong>Squad</strong> tab or click "Offer Player to Clubs" above to circulate your players with custom valuations.
               </p>
               <button
+                disabled={!windowOpen}
+                title={windowOpen ? 'Transfer list a squad player' : 'Transfer window closed (Weeks 1-6 & 20-24)'}
                 onClick={() => {
                   sounds.playClick();
-                  if (currentClub.squad.length > 0) {
-                    setPlayerToOffer(currentClub.squad[0]);
-                    setOfferPriceInput(currentClub.squad[0].value);
+                  const eligible = currentClub.squad.filter(p => !p.isInjured && !p.retiringAtSeasonEnd);
+                  if (eligible.length > 0) {
+                    setPlayerToOffer(eligible[0]);
+                    setOfferPriceInput(eligible[0].value);
                   }
                   setShowOfferPlayerModal(true);
                 }}
-                className="px-5 py-2.5 min-h-11 lg:min-h-0 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs rounded-xl shadow transition-all cursor-pointer inline-flex items-center gap-1.5"
+                className="px-5 py-2.5 min-h-11 lg:min-h-0 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs rounded-xl shadow transition-all cursor-pointer inline-flex items-center gap-1.5 disabled:opacity-45 disabled:cursor-not-allowed"
               >
                 <Tag className="w-3.5 h-3.5" />
-                <span>Transfer List a Squad Player</span>
+                <span>{windowOpen ? 'Transfer List a Squad Player' : 'Transfer Window Closed'}</span>
               </button>
             </div>
           ) : (
@@ -2616,6 +2860,7 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
                       bid={bid}
                       buyingClubColor={buyingClub?.primaryColor || '#64748b'}
                       currentValue={playerInSquad?.value ?? bid.askingPrice}
+                      windowOpen={windowOpen}
                       onReview={handleReviewBid}
                       onAccept={handleAcceptBidAction}
                       onReject={handleRejectBidAction}
@@ -2650,6 +2895,7 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
                             bid={bid}
                             buyingClubColor={buyingClub?.primaryColor || '#64748b'}
                             currentValue={playerInSquad?.value ?? bid.askingPrice}
+                            windowOpen={windowOpen}
                             onReview={handleReviewBid}
                             onAccept={handleAcceptBidAction}
                             onReject={handleRejectBidAction}
@@ -2708,14 +2954,16 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
                       </button>
 
                       <button
+                        disabled={!windowOpen}
+                        title={windowOpen ? 'Accept bid' : 'Transfer window closed'}
                         onClick={() => {
                           const bidId = selectedBidForReview.id;
                           setSelectedBidForReview(null);
                           handleAcceptBidAction(bidId);
                         }}
-                        className="px-6 py-2 min-h-11 lg:min-h-0 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 text-white font-extrabold text-xs rounded-xl shadow-lg shadow-emerald-500/20 cursor-pointer transition-all active:scale-95"
+                        className="px-6 py-2 min-h-11 lg:min-h-0 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 text-white font-extrabold text-xs rounded-xl shadow-lg shadow-emerald-500/20 cursor-pointer transition-all active:scale-95 disabled:opacity-45 disabled:cursor-not-allowed"
                       >
-                        Accept & Sanction Transfer
+                        {windowOpen ? 'Accept & Sanction Transfer' : 'Window Closed'}
                       </button>
                     </>
                   )}
@@ -2847,11 +3095,13 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
                   }}
                   className="w-full min-h-11 lg:min-h-0 px-3.5 py-2.5 bg-slate-900 border border-white/10 rounded-lg text-white text-base md:text-xs font-sans focus:outline-none focus:border-amber-400"
                 >
-                  {currentClub.squad.map(p => (
-                    <option key={p.id} value={p.id}>
-                      {p.name} ({p.position}, OVR {p.overall}) — Value: £{(p.value / 1000000).toFixed(2)}M, Wage: £{(p.wage / 1000).toFixed(0)}k/wk
-                    </option>
-                  ))}
+                  {currentClub.squad
+                    .filter(p => !p.isInjured && !p.retiringAtSeasonEnd)
+                    .map(p => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} ({p.position}, OVR {p.overall}) — Value: £{(p.value / 1000000).toFixed(2)}M, Wage: £{(p.wage / 1000).toFixed(0)}k/wk
+                      </option>
+                    ))}
                 </select>
               </div>
 
@@ -3063,8 +3313,8 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
                   className="px-2.5 py-1.5 min-h-11 lg:min-h-0 bg-slate-900 border border-white/10 rounded-lg text-base md:text-xs text-white font-mono"
                 >
                   <option value="all">Initiated: All</option>
-                  <option value="director">Initiated: Me</option>
-                  <option value="manager">Initiated: Manager</option>
+                  <option value="director">{isManagerMode ? 'Initiated: Sporting Director' : 'Initiated: Me'}</option>
+                  <option value="manager">{isManagerMode ? 'Initiated: You (Manager)' : 'Initiated: Manager'}</option>
                 </select>
 
                 <select
@@ -3124,6 +3374,7 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
                     isFromMyClub={tr.fromClubId === currentClub.id}
                     isToMyClub={tr.toClubId === currentClub.id}
                     managerName={manager?.name}
+                    isManagerMode={isManagerMode}
                   />
                 );
               })
@@ -3168,6 +3419,7 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
                           isFromMyClub={tr.fromClubId === currentClub.id}
                           isToMyClub={tr.toClubId === currentClub.id}
                           managerName={manager?.name}
+                          isManagerMode={isManagerMode}
                         />
                       );
                     })
@@ -3329,7 +3581,7 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
         {targetPlayer && (
           <div>
             {/* Step Progress Indicators */}
-            <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-semibold mb-6 border-b border-white/5 pb-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-semibold mb-4 border-b border-white/5 pb-3">
               <span className={negotiationStep === 'BID' ? 'text-amber-400 font-bold' : 'text-slate-500'}>
                 1. Club Fee
               </span>
@@ -3342,6 +3594,23 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
                 3. Owner Sign-Off
               </span>
             </div>
+
+            {negotiationStep !== 'SUCCESS' && (() => {
+              const targetStyleFit = evaluatePlayerStyleFit(manager, targetPlayer.player);
+              return (
+                <div className={`mb-4 p-3 rounded-xl border text-xs space-y-1 ${getStyleFitBadgeClass(targetStyleFit.label)}`}>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-bold">
+                      {manager ? `${manager.tacticalStyle} Fit` : 'Tactical Fit'}: {targetStyleFit.label} ({targetStyleFit.score}/100)
+                    </span>
+                    <span className="font-mono text-[11px] opacity-90">
+                      {targetPlayer.player.roleDetail} · {getMarketMomentumLabel(targetPlayer.player.growthMomentum)}
+                    </span>
+                  </div>
+                  <p className="text-[11px] opacity-90">{targetStyleFit.reason}</p>
+                </div>
+              );
+            })()}
 
             {negotiationFeedback && negotiationStep !== 'SUCCESS' && (
               <div
@@ -3481,14 +3750,39 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
                   </div>
                 </div>
 
-                {owner.recruitmentPhilosophy === 'youth_development' && targetPlayer.player.age >= 30 && (
-                  <div className="p-3 bg-amber-950/20 border border-amber-500/30 rounded-xl text-xs text-amber-300 flex items-start gap-2">
-                    <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                    <span>
-                      Caution: {owner.name} demanded a <strong>Youth Development</strong> philosophy. Signing a {targetPlayer.player.age}-year-old player may risk an owner reprimand or veto!
-                    </span>
-                  </div>
-                )}
+                {(() => {
+                  const alignment = evaluateOwnerSigningAlignment(
+                    owner,
+                    targetPlayer.player,
+                    currentClub,
+                    Number.isFinite(offerFee) ? Math.max(0, offerFee) : 0
+                  );
+                  const toneClass =
+                    alignment.status === 'mismatch'
+                      ? 'bg-rose-950/35 border-rose-500/40 text-rose-200'
+                      : alignment.status === 'caution'
+                        ? 'bg-amber-950/30 border-amber-500/35 text-amber-200'
+                        : 'bg-emerald-950/30 border-emerald-500/30 text-emerald-200';
+                  const titleText =
+                    alignment.status === 'mismatch'
+                      ? 'Owner Veto Risk'
+                      : alignment.status === 'caution'
+                        ? 'Board Caution'
+                        : 'Owner Aligned';
+                  return (
+                    <div className={`p-3 border rounded-xl text-xs flex items-start gap-2 ${toneClass}`}>
+                      {alignment.status === 'aligned' ? (
+                        <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                      ) : (
+                        <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                      )}
+                      <div>
+                        <span className="font-bold block">{titleText}</span>
+                        <p className="mt-0.5 leading-snug opacity-95">{alignment.oneLineExplanation}</p>
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {signingConfirmCheck && (
                   <div className="p-3.5 bg-rose-950/40 border border-rose-500/40 rounded-xl text-xs space-y-2">
@@ -3779,6 +4073,77 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
             </label>
           </div>
         </div>
+      </Modal>
+
+      {/* Manager Mode Instant Target Request Verdict Modal */}
+      <Modal
+        isOpen={Boolean(requestVerdict)}
+        onClose={() => setRequestVerdict(null)}
+        maxWidthClass="max-w-md"
+        borderClass={requestVerdict?.outcome.accepted ? 'border-emerald-500/40' : 'border-rose-500/40'}
+        ariaLabel="Sporting Director Transfer Request Verdict"
+        header={
+          requestVerdict && (
+            <div className="flex items-start gap-2.5">
+              {requestVerdict.outcome.accepted ? (
+                <CheckCircle className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
+              ) : (
+                <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+              )}
+              <div>
+                <span className={`text-xs font-bold uppercase tracking-wider block ${requestVerdict.outcome.accepted ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {requestVerdict.outcome.accepted ? 'Target Request Approved' : 'Target Request Declined'}
+                </span>
+                <h3 className="text-lg font-extrabold text-white">
+                  {requestVerdict.player.name}
+                </h3>
+              </div>
+            </div>
+          )
+        }
+        footer={
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={() => setRequestVerdict(null)}
+              className="min-h-11 px-5 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold text-xs cursor-pointer"
+            >
+              Done
+            </button>
+          </div>
+        }
+      >
+        {requestVerdict && (
+          <div className="space-y-3 text-xs">
+            <p className="text-slate-200 leading-relaxed">{requestVerdict.outcome.reason}</p>
+            <div className="bg-slate-900/80 border border-white/10 rounded-xl p-3 font-mono space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400">Sporting Director:</span>
+                <span className="text-white font-bold">{clubDirector?.name || 'Director'}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400">Your Influence:</span>
+                <span className="text-amber-400 font-bold">{effectiveControl}%</span>
+              </div>
+              {requestVerdict.outcome.fee > 0 && (
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400">Estimated Fee:</span>
+                  <span className="text-slate-200 font-bold">
+                    £{(requestVerdict.outcome.fee / 1000000).toFixed(2)}M
+                  </span>
+                </div>
+              )}
+              {requestVerdict.outcome.wage > 0 && (
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400">Weekly Wage:</span>
+                  <span className="text-emerald-400 font-bold">
+                    £{(requestVerdict.outcome.wage / 1000).toFixed(0)}k/wk
+                  </span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </Modal>
 
     </div>

@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { Club, Director, Owner, Manager, LeagueTier } from '../types/game';
+import { Club, Director, GameMode, LeagueTier, Manager, ManagerCareerState, Owner } from '../types/game';
 import {
   Play,
   PlusCircle,
@@ -35,7 +35,9 @@ import { validateSaveJson } from '../utils/saveValidation';
 import { PWAInstallButton } from './PWAInstallButton';
 
 interface MainMenuProps {
+  gameMode?: GameMode;
   director: Director | null;
+  managerCareer?: ManagerCareerState | null;
   club: Club | undefined;
   owner: Owner | undefined;
   manager: Manager | undefined;
@@ -46,13 +48,16 @@ interface MainMenuProps {
   allManagers: Manager[];
   onContinueCareer: () => void;
   onStartNewCareer: () => void;
+  onStartNewManagerCareer?: () => void;
   onExportSave: () => void;
   onImportSave: (saveJson: string) => { ok: boolean; error?: string };
   onResetDatabase: () => void;
 }
 
 export const MainMenu: React.FC<MainMenuProps> = ({
+  gameMode = 'director',
   director,
+  managerCareer = null,
   club,
   owner,
   manager,
@@ -63,11 +68,14 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   allManagers,
   onContinueCareer,
   onStartNewCareer,
+  onStartNewManagerCareer,
   onExportSave,
   onImportSave,
   onResetDatabase,
 }) => {
   const [activeModal, setActiveModal] = useState<'none' | 'database' | 'handbook' | 'settings' | 'confirm_new' | 'confirm_reset'>('none');
+  const [pendingModeChoice, setPendingModeChoice] = useState<GameMode>('director');
+  const hasActiveCareer = gameMode === 'manager' ? Boolean(managerCareer) : Boolean(director);
   const displayWeek = Math.min(46, currentWeek);
   const [selectedDbTier, setSelectedDbTier] = useState<LeagueTier>(1);
   const [dbSearch, setDbSearch] = useState('');
@@ -238,8 +246,71 @@ export const MainMenu: React.FC<MainMenuProps> = ({
         {/* Right Column: Menu Options & Active Career Card */}
         <div className="w-full lg:w-5/12 sm:max-w-md space-y-4">
           
-          {/* Active Career Snapshot Card (if save/director exists) */}
-          {director ? (
+          {/* Active Career Snapshot Card (if save exists in Director or Manager Mode) */}
+          {gameMode === 'manager' && managerCareer ? (
+            <div className="bg-gradient-to-b from-[#141d2e] to-[#0d1422] border-2 border-emerald-400/40 rounded-2xl p-4 sm:p-6 shadow-2xl shadow-emerald-500/10 relative overflow-hidden group">
+              <div className="flex flex-wrap items-start justify-between gap-3 mb-4 relative z-10">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div
+                    className="w-11 h-11 sm:w-12 sm:h-12 rounded-xl flex items-center justify-center font-bold text-white shadow-inner text-base border border-white/20 shrink-0"
+                    style={{ backgroundColor: club?.primaryColor || '#1e293b' }}
+                  >
+                    {club?.shortName || 'MGR'}
+                  </div>
+                  <div className="min-w-0">
+                    <span className="text-xs sm:text-[10px] font-bold font-mono tracking-wider uppercase text-emerald-400 block">
+                      {managerCareer.isRetired
+                        ? 'Retired Manager Career'
+                        : club
+                          ? 'Active Manager Mode'
+                          : 'Unemployed Manager'}
+                    </span>
+                    <h3 className="text-lg sm:text-xl font-black text-white leading-tight truncate">
+                      {club ? club.name : 'Free Agent Manager'}
+                    </h3>
+                    <div className="text-xs text-slate-300">
+                      {managerCareer.profile.name} · Age {managerCareer.profile.age} · {managerCareer.profile.tacticalStyle}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="text-left sm:text-right font-mono shrink-0">
+                  <span className="text-xs text-slate-400 block">Campaign</span>
+                  <span className="text-sm font-bold text-white">Wk {displayWeek} / 46</span>
+                  <span className="text-xs sm:text-[10px] text-amber-400 block">{seasonYear}/{seasonYear + 1}</span>
+                </div>
+              </div>
+
+              <div className="bg-black/40 border border-white/5 rounded-xl p-3 mb-5 space-y-2 text-xs font-mono relative z-10">
+                <div className="flex justify-between items-center text-slate-300">
+                  <span className="text-slate-400">Reputation:</span>
+                  <span className="font-bold text-amber-400">{managerCareer.profile.reputation} / 100</span>
+                </div>
+                <div className="flex justify-between items-center text-slate-300">
+                  <span className="text-slate-400">Seasons Managed:</span>
+                  <span className="font-bold text-white">{managerCareer.seasonHistory.length}</span>
+                </div>
+                {club && (
+                  <div className="flex justify-between items-center pt-1 border-t border-white/5">
+                    <span className="text-slate-400">Board Trust:</span>
+                    <span className="font-bold text-emerald-400">{managerCareer.boardTrust}%</span>
+                  </div>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  sounds.playWhistle();
+                  onContinueCareer();
+                }}
+                className="w-full min-h-11 py-3.5 bg-gradient-to-r from-emerald-400 to-emerald-500 hover:from-emerald-300 hover:to-emerald-400 text-slate-950 font-black text-sm rounded-xl shadow-xl shadow-emerald-500/20 flex items-center justify-center gap-2.5 transition-all cursor-pointer active:scale-95"
+              >
+                <Play className="w-4 h-4 fill-current" />
+                <span>{managerCareer.isRetired ? 'VIEW RETIREMENT ARCHIVE' : 'CONTINUE MANAGER CAREER'}</span>
+              </button>
+            </div>
+          ) : director ? (
             <div className="bg-gradient-to-b from-[#141d2e] to-[#0d1422] border-2 border-amber-400/40 rounded-2xl p-4 sm:p-6 shadow-2xl shadow-amber-500/10 relative overflow-hidden group">
               <div 
                 className="hidden md:block absolute top-0 right-0 w-32 h-32 rounded-full blur-2xl opacity-20 pointer-events-none"
@@ -336,37 +407,65 @@ export const MainMenu: React.FC<MainMenuProps> = ({
             </div>
           ) : null}
 
-          {/* Primary Action Buttons List */}
+          {/* Mode Selection: Director Mode & Manager Mode */}
           <div className="space-y-2.5">
-            {/* If no career exists, Start New Career is primary highlighted */}
-            {!director ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               <button
                 type="button"
                 onClick={() => {
-                  sounds.playGavel();
-                  onStartNewCareer();
+                  if (hasActiveCareer) {
+                    sounds.playClick();
+                    setPendingModeChoice('director');
+                    setActiveModal('confirm_new');
+                  } else {
+                    sounds.playGavel();
+                    onStartNewCareer();
+                  }
                 }}
-                className="w-full min-h-11 py-4 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-black text-sm rounded-xl shadow-xl shadow-amber-500/20 flex items-center justify-center gap-2.5 transition-all cursor-pointer active:scale-95"
+                className={`min-h-11 p-3.5 rounded-xl border text-left transition-all cursor-pointer active:scale-[0.98] ${
+                  !hasActiveCareer
+                    ? 'bg-gradient-to-br from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 border-amber-300 text-slate-950 shadow-lg shadow-amber-500/20'
+                    : 'bg-white/5 hover:bg-white/10 border-white/10 hover:border-amber-400/40 text-white'
+                }`}
               >
-                <Play className="w-4 h-4 fill-current" />
-                <span>START NEW CAREER</span>
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={() => {
-                  sounds.playClick();
-                  setActiveModal('confirm_new');
-                }}
-                className="w-full min-h-11 py-3 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-amber-400/40 text-slate-200 hover:text-white font-bold text-xs rounded-xl transition-all cursor-pointer flex items-center justify-between px-4"
-              >
-                <div className="flex items-center gap-3">
-                  <PlusCircle className="w-4 h-4 text-amber-400" />
-                  <span>Start New Career</span>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <span className="text-xs font-black uppercase tracking-wider">Director Mode</span>
+                  <Briefcase className={`w-4 h-4 ${!hasActiveCareer ? 'text-slate-950' : 'text-amber-400'}`} />
                 </div>
-                <ChevronRight className="w-4 h-4 text-slate-500" />
+                <p className={`text-[11px] leading-snug ${!hasActiveCareer ? 'text-slate-900 font-medium' : 'text-slate-400'}`}>
+                  Run the boardroom, hire coaches, and lead transfers.
+                </p>
               </button>
-            )}
+
+              {onStartNewManagerCareer && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (hasActiveCareer) {
+                      sounds.playClick();
+                      setPendingModeChoice('manager');
+                      setActiveModal('confirm_new');
+                    } else {
+                      sounds.playGavel();
+                      onStartNewManagerCareer();
+                    }
+                  }}
+                  className={`min-h-11 p-3.5 rounded-xl border text-left transition-all cursor-pointer active:scale-[0.98] ${
+                    !hasActiveCareer
+                      ? 'bg-emerald-500/15 hover:bg-emerald-500/25 border-emerald-400/45 text-white shadow-lg shadow-emerald-500/10'
+                      : 'bg-white/5 hover:bg-white/10 border-white/10 hover:border-emerald-400/40 text-white'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <span className="text-xs font-black uppercase tracking-wider">Manager Mode</span>
+                    <Award className="w-4 h-4 text-emerald-400" />
+                  </div>
+                  <p className="text-[11px] leading-snug text-slate-300">
+                    Set tactics & XI, request signings from an AI Director.
+                  </p>
+                </button>
+              )}
+            </div>
 
             {/* Club Pyramid Explorer */}
             <button
@@ -459,11 +558,15 @@ export const MainMenu: React.FC<MainMenuProps> = ({
               onClick={() => {
                 sounds.playGavel();
                 setActiveModal('none');
-                onStartNewCareer();
+                if (pendingModeChoice === 'manager' && onStartNewManagerCareer) {
+                  onStartNewManagerCareer();
+                } else {
+                  onStartNewCareer();
+                }
               }}
               className="min-h-11 lg:min-h-0 px-4 py-2 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-bold text-xs rounded-lg shadow-md cursor-pointer"
             >
-              Proceed & Create Character
+              Start {pendingModeChoice === 'manager' ? 'Manager Mode' : 'Director Mode'}
             </button>
           </div>
         }
@@ -475,14 +578,14 @@ export const MainMenu: React.FC<MainMenuProps> = ({
           <div className="text-center">
             <h3 className="text-xl font-bold text-white">Start New Career?</h3>
             <p className="text-xs text-slate-300 mt-2 leading-relaxed">
-              You have an ongoing career in progress as Sporting Director{' '}
+              You have an ongoing {gameMode === 'manager' ? 'Manager Mode' : 'Director Mode'} save{' '}
               {club ? (
                 <>
                   at <strong className="text-white">{club.name}</strong>
                 </>
               ) : (
                 <>
-                  as an <strong className="text-white">unattached free agent</strong>
+                  as a <strong className="text-white">free agent</strong>
                 </>
               )}{' '}
               (Week {displayWeek}).
@@ -763,14 +866,14 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                   <button
                     type="button"
                     onClick={confirmFileImport}
-                    className="flex-1 min-h-10 lg:min-h-0 px-3 py-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-bold cursor-pointer"
+                    className="flex-1 min-h-11 lg:min-h-0 px-3 py-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-bold cursor-pointer"
                   >
                     Replace Save
                   </button>
                   <button
                     type="button"
                     onClick={() => setPendingImportJson(null)}
-                    className="min-h-10 lg:min-h-0 px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 text-xs font-semibold cursor-pointer"
+                    className="min-h-11 lg:min-h-0 px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 text-xs font-semibold cursor-pointer"
                   >
                     Cancel
                   </button>
@@ -785,7 +888,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                   sounds.playClick();
                   onExportSave();
                 }}
-                disabled={!director}
+                disabled={!hasActiveCareer}
                 className="flex-1 min-h-11 lg:min-h-0 py-2 px-3 bg-white/5 hover:bg-white/10 disabled:opacity-40 border border-white/10 rounded-lg text-xs font-bold text-white flex items-center justify-center gap-1.5 cursor-pointer"
               >
                 <Download className="w-3.5 h-3.5 text-amber-400" />

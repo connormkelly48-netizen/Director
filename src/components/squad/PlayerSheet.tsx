@@ -4,22 +4,30 @@
  */
 
 import React, { useEffect } from 'react';
-import { Coins, Tag, Trash2, X, ShieldAlert, CheckCircle2, AlertTriangle, RefreshCw } from 'lucide-react';
-import { Player, SlotRole } from '../../types/game';
+import { Coins, Tag, Trash2, X, ShieldAlert, CheckCircle2, AlertTriangle, RefreshCw, Clock } from 'lucide-react';
+import { Manager, ManagerPlayerRequest, ManagerPlayerRequestStatus, Player, SlotRole } from '../../types/game';
+import { evaluatePlayerStyleFit } from '../../services/transferService';
 import { getSlotFit, SlotFitResult } from '../../utils/lineup';
 import { PlayerCard } from './PlayerCard';
 
 interface PlayerSheetProps {
   player: Player | null;
+  manager?: Manager;
+  windowOpen?: boolean;
   occupancyLabel: string;
   slotRole?: SlotRole;
   mode: 'panel' | 'sheet';
   isOpen: boolean;
+  directorControlled?: boolean;
+  saleRequest?: ManagerPlayerRequest;
+  renewalRequest?: ManagerPlayerRequest;
   onClose: () => void;
   onSell: (player: Player) => void;
   onOffer: (player: Player) => void;
   onRenew: (player: Player) => void;
   onRelease: (player: Player) => void;
+  onRequestSale?: (player: Player) => void;
+  onRequestRenewal?: (player: Player) => void;
 }
 
 const getMomentumLabel = (momentum: Player['growthMomentum']) => {
@@ -46,6 +54,92 @@ const getMoraleLabel = (morale: Player['morale']) => {
   return morale.charAt(0).toUpperCase() + morale.slice(1);
 };
 
+const getStyleFitBadgeClass = (label: 'Ideal Fit' | 'Strong Fit' | 'Neutral' | 'Misfit') => {
+  switch (label) {
+    case 'Ideal Fit':
+      return 'border-emerald-500/35 bg-emerald-500/10 text-emerald-300';
+    case 'Strong Fit':
+      return 'border-sky-500/35 bg-sky-500/10 text-sky-300';
+    case 'Misfit':
+      return 'border-rose-500/35 bg-rose-500/10 text-rose-300';
+    default:
+      return 'border-white/10 bg-slate-900/80 text-slate-300';
+  }
+};
+
+function getSaleDisabledReason(player: Player, windowOpen: boolean): string | null {
+  if (!windowOpen) return 'Transfer window closed (Weeks 1-6 & 20-24)';
+  if (player.isInjured) return 'Injured players cannot be sold or offered';
+  if (player.retiringAtSeasonEnd) return 'Retiring players cannot be sold or offered';
+  return null;
+}
+
+function getRenewalDisabledReason(player: Player): string | null {
+  if (player.retiringAtSeasonEnd) return 'Retiring players cannot extend contracts';
+  if (player.contractYears >= 5) return 'Already on a maximum 5-year contract';
+  return null;
+}
+
+function getRequestStatusMeta(status: ManagerPlayerRequestStatus) {
+  switch (status) {
+    case 'accepted':
+      return {
+        label: 'Accepted',
+        badgeClass: 'border-emerald-500/35 bg-emerald-500/15 text-emerald-300',
+        cardClass: 'border-emerald-500/25 bg-emerald-500/10 text-emerald-200',
+      };
+    case 'ignored':
+      return {
+        label: 'Ignored',
+        badgeClass: 'border-rose-500/35 bg-rose-500/15 text-rose-300',
+        cardClass: 'border-rose-500/25 bg-rose-500/10 text-rose-200',
+      };
+    default:
+      return {
+        label: 'Pending',
+        badgeClass: 'border-amber-400/35 bg-amber-400/15 text-amber-300',
+        cardClass: 'border-amber-400/25 bg-amber-400/10 text-amber-200',
+      };
+  }
+}
+
+function renderDirectorRequestsSummary(
+  saleRequest?: ManagerPlayerRequest,
+  renewalRequest?: ManagerPlayerRequest
+) {
+  const requests = [saleRequest, renewalRequest].filter(
+    (req): req is ManagerPlayerRequest => Boolean(req)
+  );
+  if (requests.length === 0) return null;
+
+  return (
+    <div className="space-y-2">
+      {requests.map(req => {
+        const meta = getRequestStatusMeta(req.status);
+        return (
+          <div
+            key={req.id}
+            className={`border rounded-xl px-3 py-2.5 text-xs space-y-1 ${meta.cardClass}`}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-bold text-white">
+                {req.kind === 'sale' ? 'Sale Request' : 'Renewal Request'}
+              </span>
+              <span
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[11px] font-bold ${meta.badgeClass}`}
+              >
+                {req.status === 'pending' && <Clock className="w-3 h-3" />}
+                <span>{meta.label}</span>
+              </span>
+            </div>
+            <p className="text-[11px] leading-snug opacity-95">{req.message}</p>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function renderFitSummary(fitResult: SlotFitResult | null, slotRole?: SlotRole, occupancyLabel?: string) {
   if (!fitResult || !slotRole) {
     return (
@@ -64,26 +158,19 @@ function renderFitSummary(fitResult: SlotFitResult | null, slotRole?: SlotRole, 
           color: 'text-emerald-400',
           border: 'border-emerald-500/30 bg-emerald-500/10',
         }
-      : fitResult.fit === 'good'
+      : fitResult.fit === 'poor'
         ? {
-            icon: <CheckCircle2 className="w-4 h-4 text-sky-400 shrink-0" />,
-            label: `Secondary ${slotRole} (${fitResult.penalty})`,
-            color: 'text-sky-300',
-            border: 'border-sky-500/30 bg-sky-500/10',
+            icon: <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />,
+            label: `Out of Position ${slotRole} (${fitResult.penalty})`,
+            color: 'text-amber-300',
+            border: 'border-amber-500/35 bg-amber-500/10',
           }
-        : fitResult.fit === 'poor'
-          ? {
-              icon: <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />,
-              label: `Out of Position ${slotRole} (${fitResult.penalty})`,
-              color: 'text-amber-300',
-              border: 'border-amber-500/35 bg-amber-500/10',
-            }
-          : {
-              icon: <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />,
-              label: `Unnatural ${slotRole} (${fitResult.penalty})`,
-              color: 'text-rose-300',
-              border: 'border-rose-500/35 bg-rose-500/10',
-            };
+        : {
+            icon: <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />,
+            label: `Unnatural ${slotRole} (${fitResult.penalty})`,
+            color: 'text-rose-300',
+            border: 'border-rose-500/35 bg-rose-500/10',
+          };
 
   return (
     <div className={`border rounded-xl px-3.5 py-2.5 flex items-center justify-between gap-2 text-xs ${badge.border}`}>
@@ -91,24 +178,33 @@ function renderFitSummary(fitResult: SlotFitResult | null, slotRole?: SlotRole, 
         {badge.icon}
         <span className={`font-bold truncate ${badge.color}`}>{badge.label}</span>
       </div>
-      <span className="font-mono font-extrabold text-white tabular-nums shrink-0">
-        {fitResult.effectiveOverall} Effective OVR
-      </span>
+      {fitResult.penalty < 0 && (
+        <span className="font-mono font-extrabold text-white tabular-nums shrink-0">
+          {fitResult.effectiveOverall} Effective OVR
+        </span>
+      )}
     </div>
   );
 }
 
 export const PlayerSheet: React.FC<PlayerSheetProps> = ({
   player,
+  manager,
+  windowOpen = true,
   occupancyLabel,
   slotRole,
   mode,
   isOpen,
+  directorControlled = false,
+  saleRequest,
+  renewalRequest,
   onClose,
   onSell,
   onOffer,
   onRenew,
   onRelease,
+  onRequestSale,
+  onRequestRenewal,
 }) => {
   useEffect(() => {
     if (mode !== 'sheet' || !isOpen) return;
@@ -137,6 +233,9 @@ export const PlayerSheet: React.FC<PlayerSheetProps> = ({
     }
 
     const fitResult = slotRole ? getSlotFit(player, slotRole) : null;
+    const styleFit = evaluatePlayerStyleFit(manager, player);
+    const saleDisabledReason = getSaleDisabledReason(player, windowOpen);
+    const renewalDisabledReason = getRenewalDisabledReason(player);
     const formPct = Math.max(0, Math.min(100, (player.form / 10) * 100));
 
     return (
@@ -176,6 +275,20 @@ export const PlayerSheet: React.FC<PlayerSheetProps> = ({
 
         <div className="p-4 space-y-4">
           {renderFitSummary(fitResult, slotRole, occupancyLabel)}
+
+          {/* Tactical Style Fit */}
+          <div className={`border rounded-xl px-3.5 py-2.5 space-y-1 text-xs ${getStyleFitBadgeClass(styleFit.label)}`}>
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-bold">
+                {manager ? `${manager.tacticalStyle} Fit` : 'Tactical Fit'}: {styleFit.label}
+              </span>
+              <span className="font-mono font-extrabold tabular-nums">
+                {styleFit.score}/100
+                {styleFit.matchBonus !== 0 ? ` (${styleFit.matchBonus > 0 ? '+' : ''}${styleFit.matchBonus} match)` : ''}
+              </span>
+            </div>
+            <p className="text-[11px] opacity-90 leading-snug">{styleFit.reason}</p>
+          </div>
 
           {/* Form bar + Morale */}
           <div className="grid grid-cols-2 gap-3">
@@ -229,41 +342,87 @@ export const PlayerSheet: React.FC<PlayerSheetProps> = ({
               </span>
             </div>
           </div>
+          {directorControlled && renderDirectorRequestsSummary(saleRequest, renewalRequest)}
         </div>
 
+        {(saleDisabledReason || (directorControlled && renewalDisabledReason)) && (
+          <div className="px-4 py-2 bg-slate-900/90 border-t border-white/10 text-[11px] text-amber-300/90 font-medium">
+            {saleDisabledReason || renewalDisabledReason}
+          </div>
+        )}
+
         <div className="p-4 pt-3 border-t border-white/10 bg-slate-900/50 grid grid-cols-2 gap-2">
-          <button
-            type="button"
-            onClick={() => onSell(player)}
-            className="min-h-11 px-3 py-2 text-xs font-bold bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-emerald-300 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
-          >
-            <Coins className="w-4 h-4" />
-            <span>Sell</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => onOffer(player)}
-            className="min-h-11 px-3 py-2 text-xs font-bold bg-amber-400/10 hover:bg-amber-400/20 border border-amber-400/30 text-amber-300 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
-          >
-            <Tag className="w-4 h-4" />
-            <span>Offer</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => onRenew(player)}
-            className="min-h-11 px-3 py-2 text-xs font-bold bg-white/5 hover:bg-white/10 border border-white/10 text-slate-200 hover:text-white rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
-          >
-            <RefreshCw className="w-4 h-4" />
-            <span>Renew</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => onRelease(player)}
-            className="min-h-11 px-3 py-2 text-xs font-bold bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/25 text-rose-300 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
-          >
-            <Trash2 className="w-4 h-4" />
-            <span>Release</span>
-          </button>
+          {directorControlled ? (
+            <>
+              <button
+                type="button"
+                disabled={Boolean(saleDisabledReason || saleRequest || !onRequestSale)}
+                title={
+                  saleRequest
+                    ? `Sale request already ${saleRequest.status} this window`
+                    : (saleDisabledReason ?? 'Ask the Sporting Director to sell this player')
+                }
+                onClick={() => onRequestSale?.(player)}
+                className="min-h-11 px-3 py-2 text-xs font-bold bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-emerald-300 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-45 disabled:cursor-not-allowed"
+              >
+                <Coins className="w-4 h-4 shrink-0" />
+                <span>Request sale</span>
+              </button>
+              <button
+                type="button"
+                disabled={Boolean(renewalDisabledReason || renewalRequest || !onRequestRenewal)}
+                title={
+                  renewalRequest
+                    ? `Renewal request already ${renewalRequest.status} this window`
+                    : (renewalDisabledReason ?? 'Ask the Sporting Director to renew this player')
+                }
+                onClick={() => onRequestRenewal?.(player)}
+                className="min-h-11 px-3 py-2 text-xs font-bold bg-amber-400/15 hover:bg-amber-400/25 border border-amber-400/35 text-amber-300 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-45 disabled:cursor-not-allowed"
+              >
+                <RefreshCw className="w-4 h-4 shrink-0" />
+                <span>Request renewal</span>
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                disabled={Boolean(saleDisabledReason)}
+                title={saleDisabledReason ?? 'Sell player'}
+                onClick={() => onSell(player)}
+                className="min-h-11 px-3 py-2 text-xs font-bold bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-emerald-300 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-45 disabled:cursor-not-allowed"
+              >
+                <Coins className="w-4 h-4" />
+                <span>Sell</span>
+              </button>
+              <button
+                type="button"
+                disabled={Boolean(saleDisabledReason)}
+                title={saleDisabledReason ?? 'Offer player to clubs'}
+                onClick={() => onOffer(player)}
+                className="min-h-11 px-3 py-2 text-xs font-bold bg-amber-400/10 hover:bg-amber-400/20 border border-amber-400/30 text-amber-300 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-45 disabled:cursor-not-allowed"
+              >
+                <Tag className="w-4 h-4" />
+                <span>Offer</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onRenew(player)}
+                className="min-h-11 px-3 py-2 text-xs font-bold bg-white/5 hover:bg-white/10 border border-white/10 text-slate-200 hover:text-white rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                <RefreshCw className="w-4 h-4" />
+                <span>Renew</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onRelease(player)}
+                className="min-h-11 px-3 py-2 text-xs font-bold bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/25 text-rose-300 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>Release</span>
+              </button>
+            </>
+          )}
         </div>
       </div>
     );
@@ -273,6 +432,9 @@ export const PlayerSheet: React.FC<PlayerSheetProps> = ({
   if (!isOpen || !player) return null;
 
   const fitResult = slotRole ? getSlotFit(player, slotRole) : null;
+  const styleFit = evaluatePlayerStyleFit(manager, player);
+  const saleDisabledReason = getSaleDisabledReason(player, windowOpen);
+  const renewalDisabledReason = getRenewalDisabledReason(player);
   const formPct = Math.max(0, Math.min(100, (player.form / 10) * 100));
 
   return (
@@ -330,6 +492,20 @@ export const PlayerSheet: React.FC<PlayerSheetProps> = ({
         {/* Scrollable Body */}
         <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 sm:px-6 py-4 space-y-4">
           {renderFitSummary(fitResult, slotRole, occupancyLabel)}
+
+          {/* Tactical Style Fit */}
+          <div className={`border rounded-xl px-3.5 py-2.5 space-y-1 text-xs ${getStyleFitBadgeClass(styleFit.label)}`}>
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-bold">
+                {manager ? `${manager.tacticalStyle} Fit` : 'Tactical Fit'}: {styleFit.label}
+              </span>
+              <span className="font-mono font-extrabold tabular-nums">
+                {styleFit.score}/100
+                {styleFit.matchBonus !== 0 ? ` (${styleFit.matchBonus > 0 ? '+' : ''}${styleFit.matchBonus} match)` : ''}
+              </span>
+            </div>
+            <p className="text-[11px] opacity-90 leading-snug">{styleFit.reason}</p>
+          </div>
 
           {/* Form & Morale */}
           <div className="grid grid-cols-2 gap-3">
@@ -402,42 +578,88 @@ export const PlayerSheet: React.FC<PlayerSheetProps> = ({
               </div>
             </div>
           </div>
+          {directorControlled && renderDirectorRequestsSummary(saleRequest, renewalRequest)}
         </div>
+
+        {(saleDisabledReason || (directorControlled && renewalDisabledReason)) && (
+          <div className="shrink-0 px-4 sm:px-6 py-2 bg-slate-900/90 border-t border-white/10 text-[11px] text-amber-300/90 font-medium">
+            {saleDisabledReason || renewalDisabledReason}
+          </div>
+        )}
 
         {/* Sticky Bottom Actions */}
         <div className="shrink-0 px-4 sm:px-6 pt-3 safe-area-modal-footer lg:pb-5 border-t border-white/10 bg-[#111827] grid grid-cols-2 gap-2">
-          <button
-            type="button"
-            onClick={() => onSell(player)}
-            className="min-h-11 px-3 py-2 text-xs font-bold bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-emerald-300 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
-          >
-            <Coins className="w-4 h-4" />
-            <span>Sell</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => onOffer(player)}
-            className="min-h-11 px-3 py-2 text-xs font-bold bg-amber-400/10 hover:bg-amber-400/20 border border-amber-400/30 text-amber-300 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
-          >
-            <Tag className="w-4 h-4" />
-            <span>Offer</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => onRenew(player)}
-            className="min-h-11 px-3 py-2 text-xs font-bold bg-white/5 hover:bg-white/10 border border-white/10 text-slate-200 hover:text-white rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
-          >
-            <RefreshCw className="w-4 h-4" />
-            <span>Renew</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => onRelease(player)}
-            className="min-h-11 px-3 py-2 text-xs font-bold bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/25 text-rose-300 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
-          >
-            <Trash2 className="w-4 h-4" />
-            <span>Release</span>
-          </button>
+          {directorControlled ? (
+            <>
+              <button
+                type="button"
+                disabled={Boolean(saleDisabledReason || saleRequest || !onRequestSale)}
+                title={
+                  saleRequest
+                    ? `Sale request already ${saleRequest.status} this window`
+                    : (saleDisabledReason ?? 'Ask the Sporting Director to sell this player')
+                }
+                onClick={() => onRequestSale?.(player)}
+                className="min-h-11 px-3 py-2 text-xs font-bold bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-emerald-300 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-45 disabled:cursor-not-allowed"
+              >
+                <Coins className="w-4 h-4 shrink-0" />
+                <span>Request sale</span>
+              </button>
+              <button
+                type="button"
+                disabled={Boolean(renewalDisabledReason || renewalRequest || !onRequestRenewal)}
+                title={
+                  renewalRequest
+                    ? `Renewal request already ${renewalRequest.status} this window`
+                    : (renewalDisabledReason ?? 'Ask the Sporting Director to renew this player')
+                }
+                onClick={() => onRequestRenewal?.(player)}
+                className="min-h-11 px-3 py-2 text-xs font-bold bg-amber-400/15 hover:bg-amber-400/25 border border-amber-400/35 text-amber-300 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-45 disabled:cursor-not-allowed"
+              >
+                <RefreshCw className="w-4 h-4 shrink-0" />
+                <span>Request renewal</span>
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                disabled={Boolean(saleDisabledReason)}
+                title={saleDisabledReason ?? 'Sell player'}
+                onClick={() => onSell(player)}
+                className="min-h-11 px-3 py-2 text-xs font-bold bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-emerald-300 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-45 disabled:cursor-not-allowed"
+              >
+                <Coins className="w-4 h-4" />
+                <span>Sell</span>
+              </button>
+              <button
+                type="button"
+                disabled={Boolean(saleDisabledReason)}
+                title={saleDisabledReason ?? 'Offer player to clubs'}
+                onClick={() => onOffer(player)}
+                className="min-h-11 px-3 py-2 text-xs font-bold bg-amber-400/10 hover:bg-amber-400/20 border border-amber-400/30 text-amber-300 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-45 disabled:cursor-not-allowed"
+              >
+                <Tag className="w-4 h-4" />
+                <span>Offer</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onRenew(player)}
+                className="min-h-11 px-3 py-2 text-xs font-bold bg-white/5 hover:bg-white/10 border border-white/10 text-slate-200 hover:text-white rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                <RefreshCw className="w-4 h-4" />
+                <span>Renew</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onRelease(player)}
+                className="min-h-11 px-3 py-2 text-xs font-bold bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/25 text-rose-300 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>Release</span>
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>

@@ -197,21 +197,29 @@ export const TransferROICard: React.FC<TransferROICardProps> = ({
       </div>
 
       {activeCount > 0 && (
-        <div className="border-t border-white/10 pt-3 mt-4 flex items-center justify-between gap-2">
-          <span className="text-xs sm:text-[11px] text-slate-400 font-mono tabular-nums">
-            Avg {summary.avgOvrDelta >= 0 ? `+${summary.avgOvrDelta.toFixed(1)}` : summary.avgOvrDelta.toFixed(1)} OVR / signing
-          </span>
-          <button
-            type="button"
-            onClick={() => {
-              sounds.playClick();
-              onInspect();
-            }}
-            className="min-h-11 lg:min-h-0 px-2.5 py-1 text-xs font-semibold text-amber-400 hover:text-amber-300 hover:bg-amber-400/10 rounded-lg transition-colors cursor-pointer inline-flex items-center gap-1 whitespace-nowrap shrink-0"
-          >
-            <span>Inspect ROI</span>
-            <ArrowUpRight className="w-3.5 h-3.5" />
-          </button>
+        <div className="border-t border-white/10 pt-3 mt-4 space-y-2">
+          <div className="flex items-center justify-between gap-2 text-[11px] font-mono">
+            <span className="text-slate-400">Season Grade Link (20% Weight):</span>
+            <span className={collectiveOvrDelta > 0 ? 'text-emerald-400 font-bold' : collectiveOvrDelta < 0 ? 'text-rose-400 font-bold' : 'text-amber-300 font-bold'}>
+              {collectiveOvrDelta > 0 ? 'Positive ROI Boost' : collectiveOvrDelta < 0 ? 'Depreciation Drag' : 'Neutral Standing'}
+            </span>
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs sm:text-[11px] text-slate-400 font-mono tabular-nums">
+              Avg {summary.avgOvrDelta >= 0 ? `+${summary.avgOvrDelta.toFixed(1)}` : summary.avgOvrDelta.toFixed(1)} OVR / signing
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                sounds.playClick();
+                onInspect();
+              }}
+              className="min-h-11 lg:min-h-0 px-2.5 py-1 text-xs font-semibold text-amber-400 hover:text-amber-300 hover:bg-amber-400/10 rounded-lg transition-colors cursor-pointer inline-flex items-center gap-1 whitespace-nowrap shrink-0"
+            >
+              <span>Inspect ROI</span>
+              <ArrowUpRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
       )}
     </section>

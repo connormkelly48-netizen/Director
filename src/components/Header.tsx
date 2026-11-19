@@ -26,7 +26,7 @@ import {
   Upload,
   WifiOff,
 } from 'lucide-react';
-import { Club, Director } from '../types/game';
+import { Club, Director, GameMode, ManagerCareerState } from '../types/game';
 import { sounds } from '../services/soundEffects';
 import { Modal } from './ui/Modal';
 import { useOnlineStatus } from '../utils/pwa';
@@ -34,12 +34,14 @@ import { validateSaveJson } from '../utils/saveValidation';
 import { PWAInstallButton } from './PWAInstallButton';
 
 interface HeaderProps {
+  gameMode?: GameMode;
   currentTab: string;
   setCurrentTab: (tab: string) => void;
   currentWeek: number;
   seasonYear: number;
   club: Club | undefined;
   director: Director;
+  managerCareer?: ManagerCareerState | null;
   pendingProposalsCount?: number;
   onAdvanceWeek: () => void;
   onFastForwardJan: () => void;
@@ -51,12 +53,14 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({
+  gameMode = 'director',
   currentTab,
   setCurrentTab,
   currentWeek,
   seasonYear,
   club,
   director,
+  managerCareer = null,
   pendingProposalsCount = 0,
   onAdvanceWeek,
   onFastForwardJan,
@@ -131,23 +135,41 @@ export const Header: React.FC<HeaderProps> = ({
     }
   };
 
-  const navItems = [
-    { id: 'dashboard', label: 'Executive Suite', shortLabel: 'Home', icon: LayoutDashboard },
-    { id: 'boardroom', label: 'The Boardroom', shortLabel: 'Board', icon: Building2 },
-    { id: 'responsibilities', label: 'Delegation & Staff', shortLabel: 'Staff', icon: Sliders },
-    { id: 'manager', label: 'Head Coach', shortLabel: 'Coach', icon: UserCheck },
-    { id: 'squad', label: 'First Team', shortLabel: 'Squad', icon: Users },
-    { id: 'academy', label: 'Youth Academy', shortLabel: 'Academy', icon: GraduationCap },
-    { id: 'transfers', label: 'Transfers', shortLabel: 'Transfers', icon: ArrowLeftRight },
-    { id: 'jobs', label: 'Job Market', shortLabel: 'Jobs', icon: Briefcase },
-  ];
+  const isManagerMode = gameMode === 'manager';
+  const navItems = isManagerMode
+    ? [
+        { id: 'dashboard', label: 'Dugout', shortLabel: 'Dugout', icon: LayoutDashboard },
+        { id: 'manager_director', label: 'Director', shortLabel: 'Director', icon: UserCheck },
+        { id: 'squad', label: 'Tactics & XI', shortLabel: 'Tactics', icon: Users },
+        { id: 'academy', label: 'Academy', shortLabel: 'Academy', icon: GraduationCap },
+        { id: 'transfers', label: 'Transfers', shortLabel: 'Transfers', icon: ArrowLeftRight },
+        { id: 'manager_history', label: 'Season History', shortLabel: 'History', icon: Award },
+        { id: 'manager_offers', label: 'Job Market', shortLabel: 'Offers', icon: Briefcase },
+      ]
+    : [
+        { id: 'dashboard', label: 'Executive Suite', shortLabel: 'Home', icon: LayoutDashboard },
+        { id: 'boardroom', label: 'The Boardroom', shortLabel: 'Board', icon: Building2 },
+        { id: 'responsibilities', label: 'Delegation & Staff', shortLabel: 'Staff', icon: Sliders },
+        { id: 'manager', label: 'Head Coach', shortLabel: 'Coach', icon: UserCheck },
+        { id: 'squad', label: 'First Team', shortLabel: 'Squad', icon: Users },
+        { id: 'academy', label: 'Academy', shortLabel: 'Academy', icon: GraduationCap },
+        { id: 'transfers', label: 'Transfers', shortLabel: 'Transfers', icon: ArrowLeftRight },
+        { id: 'jobs', label: 'Job Market', shortLabel: 'Jobs', icon: Briefcase },
+      ];
 
-  const primaryMobileTabIds = ['dashboard', 'squad', 'transfers', 'boardroom'];
+  const primaryMobileTabIds = isManagerMode
+    ? ['dashboard', 'squad', 'academy', 'transfers']
+    : ['dashboard', 'squad', 'transfers', 'boardroom'];
   const primaryMobileTabs = primaryMobileTabIds
     .map(id => navItems.find(item => item.id === id))
     .filter((item): item is (typeof navItems)[number] => Boolean(item));
   const secondaryMobileTabs = navItems.filter(item => !primaryMobileTabIds.includes(item.id));
   const isSecondaryTabActive = secondaryMobileTabs.some(item => item.id === currentTab);
+  const offersBadgeCount = isManagerMode ? (managerCareer?.activeOffers.length || 0) : 0;
+  const directorBadgeCount =
+    isManagerMode && managerCareer?.currentClubId && managerCareer.pendingDirectorCounterOffer
+      ? 1
+      : 0;
 
   const currentWages = club ? club.squad.reduce((acc, p) => acc + p.wage, 0) : 0;
   const balanceLabel = club ? `£${(club.balance / 1000000).toFixed(1)}M` : '£0.0M';
@@ -203,7 +225,14 @@ export const Header: React.FC<HeaderProps> = ({
           <nav className="hidden xl:flex items-center gap-1" aria-label="Main navigation">
             {navItems.map(item => {
               const active = currentTab === item.id;
-              const badgeCount = item.id === 'transfers' ? pendingProposalsCount : 0;
+              const badgeCount =
+                item.id === 'transfers'
+                  ? (isManagerMode ? 0 : pendingProposalsCount)
+                  : item.id === 'manager_offers'
+                    ? offersBadgeCount
+                    : item.id === 'manager_director'
+                      ? directorBadgeCount
+                      : 0;
               return (
                 <button
                   key={item.id}
@@ -349,7 +378,14 @@ export const Header: React.FC<HeaderProps> = ({
         <nav className="hidden lg:flex xl:hidden items-center flex-wrap gap-1 mt-2.5 pt-2.5 border-t border-white/10 max-w-7xl 2xl:max-w-[1600px] mx-auto" aria-label="Main navigation">
           {navItems.map(item => {
             const active = currentTab === item.id;
-            const badgeCount = item.id === 'transfers' ? pendingProposalsCount : 0;
+            const badgeCount =
+              item.id === 'transfers'
+                ? (isManagerMode ? 0 : pendingProposalsCount)
+                : item.id === 'manager_offers'
+                  ? offersBadgeCount
+                  : item.id === 'manager_director'
+                    ? directorBadgeCount
+                    : 0;
             return (
               <button
                 key={item.id}
@@ -446,7 +482,7 @@ export const Header: React.FC<HeaderProps> = ({
           {primaryMobileTabs.map(item => {
             const Icon = item.icon;
             const active = currentTab === item.id;
-            const badgeCount = item.id === 'transfers' ? pendingProposalsCount : 0;
+            const badgeCount = item.id === 'transfers' && !isManagerMode ? pendingProposalsCount : 0;
             return (
               <button
                 key={item.id}
@@ -513,6 +549,12 @@ export const Header: React.FC<HeaderProps> = ({
           {secondaryMobileTabs.map(item => {
             const Icon = item.icon;
             const active = currentTab === item.id;
+            const itemBadge =
+              item.id === 'manager_offers'
+                ? offersBadgeCount
+                : item.id === 'manager_director'
+                  ? directorBadgeCount
+                  : 0;
             return (
               <button
                 key={item.id}
@@ -522,14 +564,21 @@ export const Header: React.FC<HeaderProps> = ({
                   setCurrentTab(item.id);
                   closeMoreSheet();
                 }}
-                className={`w-full min-h-12 px-4 py-3 rounded-xl border text-left text-sm font-bold flex items-center gap-3 transition-colors cursor-pointer ${
+                className={`w-full min-h-12 px-4 py-3 rounded-xl border text-left text-sm font-bold flex items-center justify-between gap-3 transition-colors cursor-pointer ${
                   active
                     ? 'bg-amber-400/15 border-amber-400/40 text-amber-300'
                     : 'bg-slate-900/70 border-white/10 text-slate-200 hover:bg-white/10'
                 }`}
               >
-                <Icon className={`w-5 h-5 shrink-0 ${active ? 'text-amber-400' : 'text-slate-400'}`} />
-                <span>{item.label}</span>
+                <span className="flex items-center gap-3 min-w-0">
+                  <Icon className={`w-5 h-5 shrink-0 ${active ? 'text-amber-400' : 'text-slate-400'}`} />
+                  <span className="truncate">{item.label}</span>
+                </span>
+                {itemBadge > 0 && (
+                  <span className="px-2 py-0.5 rounded-full text-xs font-mono font-bold bg-amber-400 text-slate-950 leading-none shrink-0">
+                    {itemBadge}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -560,14 +609,14 @@ export const Header: React.FC<HeaderProps> = ({
                   <button
                     type="button"
                     onClick={confirmMobileImport}
-                    className="flex-1 min-h-10 px-3 py-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-bold cursor-pointer"
+                    className="flex-1 min-h-11 px-3 py-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-bold cursor-pointer"
                   >
                     Replace Save
                   </button>
                   <button
                     type="button"
                     onClick={() => setPendingImportJson(null)}
-                    className="min-h-10 px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 text-xs font-semibold cursor-pointer"
+                    className="min-h-11 px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 text-xs font-semibold cursor-pointer"
                   >
                     Cancel
                   </button>

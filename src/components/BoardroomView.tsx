@@ -181,9 +181,9 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
               <span className="text-xs sm:text-[10px] text-slate-400 uppercase block mb-1">Patience Level</span>
               <span className="text-sm font-bold text-white capitalize">{owner.patience}</span>
               <span className="text-xs sm:text-[10px] text-slate-500 block mt-0.5">
-                {owner.patience === 'volatile' ? 'Sacks easily on losing streaks' :
-                 owner.patience === 'impatient' ? 'Demands instant success' :
-                 owner.patience === 'balanced' ? 'Reasonable review periods' : 'Long-term process support'}
+                {owner.patience === 'volatile' ? 'Sacks below 38% approval / early after 5 games' :
+                 owner.patience === 'impatient' ? 'Sacks below 32% approval / short slump' :
+                 owner.patience === 'balanced' ? 'Sacks below 25% approval after mid-review' : 'Sacks only below 18% long-term collapse'}
               </span>
             </div>
 
@@ -191,25 +191,31 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
               <span className="text-xs sm:text-[10px] text-slate-400 uppercase block mb-1">Involvement</span>
               <span className="text-sm font-bold text-white capitalize">{owner.involvement.replace('_', ' ')}</span>
               <span className="text-xs sm:text-[10px] text-slate-500 block mt-0.5">
-                {owner.involvement === 'micromanager' ? 'Demands specific transfers' :
-                 owner.involvement === 'collaborative' ? 'Values consensus' : 'Gives director 100% autonomy'}
+                {owner.involvement === 'micromanager' ? 'Frequent vetoes & weekly demands' :
+                 owner.involvement === 'collaborative' ? 'Blocks severe mismatches' : 'Hands off; vetoes only extreme outliers'}
               </span>
             </div>
 
             <div className="bg-slate-900/80 border border-white/5 rounded-xl p-3">
               <span className="text-xs sm:text-[10px] text-slate-400 uppercase block mb-1">Recruitment Model</span>
               <span className="text-sm font-bold text-amber-400 capitalize">{owner.recruitmentPhilosophy.replace('_', ' ')}</span>
-              <span className="text-xs sm:text-[10px] text-slate-500 block mt-0.5">Core criteria for signings</span>
+              <span className="text-xs sm:text-[10px] text-slate-500 block mt-0.5">
+                {owner.recruitmentPhilosophy === 'youth_development' ? 'Favours U23, opposes veteran buys' :
+                 owner.recruitmentPhilosophy === 'marquee_stars' ? 'Demands 81+ OVR statement stars' :
+                 owner.recruitmentPhilosophy === 'moneyball_data' ? 'Rejects overpaying above valuation' :
+                 owner.recruitmentPhilosophy === 'domestic_grit' ? 'Backs UK & Irish homegrown core' :
+                 'Demands proven win-now starters'}
+              </span>
             </div>
           </div>
 
           {/* Demanded Targets & Constraints */}
-          {owner.demandedTargets && owner.demandedTargets.length > 0 && (
-            <div className="bg-amber-400/5 border border-amber-400/20 rounded-xl p-4">
-              <span className="text-xs font-bold text-amber-300 block mb-2 flex items-center gap-1.5">
-                <AlertTriangle className="w-3.5 h-3.5" />
-                Board Mandated Recruitment Criteria
-              </span>
+          <div className="bg-amber-400/5 border border-amber-400/20 rounded-xl p-4">
+            <span className="text-xs font-bold text-amber-300 block mb-2 flex items-center gap-1.5">
+              <AlertTriangle className="w-3.5 h-3.5" />
+              Board Mandated Recruitment Criteria
+            </span>
+            {owner.demandedTargets && owner.demandedTargets.length > 0 ? (
               <div className="flex flex-wrap gap-2">
                 {owner.demandedTargets.map((target, idx) => (
                   <span key={idx} className="text-xs bg-slate-900 border border-white/10 px-3 py-1 rounded-md text-slate-200">
@@ -217,11 +223,21 @@ export const BoardroomView: React.FC<BoardroomViewProps> = ({
                   </span>
                 ))}
               </div>
-              <p className="text-xs sm:text-[11px] text-slate-400 mt-2">
-                Note: Signing players that contradict the owner's philosophy may trigger boardroom vetoes or disciplinary inquiries!
-              </p>
-            </div>
-          )}
+            ) : (
+              <span className="text-xs text-slate-300 block">
+                {owner.involvement === 'hands_off'
+                  ? `No specific player mandates — operate freely within your ${owner.wealth} financial envelope.`
+                  : `Alignment expected with ${owner.recruitmentPhilosophy.replace('_', ' ')} philosophy on incoming fees and squad age.`}
+              </span>
+            )}
+            <p className="text-xs sm:text-[11px] text-slate-400 mt-2">
+              {owner.involvement === 'micromanager'
+                ? 'Active Oversight: Misaligned signings or high-fee buys trigger immediate boardroom vetoes and weekly interventions.'
+                : owner.involvement === 'collaborative'
+                ? 'Collaborative Board: Aligned targets boost owner confidence (+3 to +4%), while philosophy mismatches risk vetoes.'
+                : 'Hands-Off Mandate: Ownership steps back unless finances are critically strained.'}
+            </p>
+          </div>
 
         </div>
 

@@ -11,15 +11,16 @@ import {
   Manager,
   ManagerSigningEvent,
   Owner,
+  OwnerAlignmentResult,
   Player,
   PlayerPosition,
+  PlayerStyleFit,
   PressHeadline,
   TransferProposal,
   TransferRecord,
 } from '../types/game';
 import { FORMATIONS } from '../data/formations';
 import {
-  getSlotFit,
   resolveClubLineup,
   syncLineupAfterSquadChange,
 } from '../utils/lineup';
@@ -35,6 +36,342 @@ export const MAX_TRANSFER_HISTORY_RECORDS = 500;
 export const MAX_PENDING_PROPOSALS = 3;
 export const MAX_MANAGER_SIGNINGS_PER_SEASON = 5;
 export const MAX_MANAGER_SALES_PER_SEASON = 5;
+
+export function isTransferWindowOpen(week: number): boolean {
+  return week <= 6 || (week >= 20 && week <= 24);
+}
+
+export function getTransferWindowLabel(week: number): string {
+  if (week <= 6) return `Summer Window Open (Wk ${week}/6)`;
+  if (week >= 20 && week <= 24) return `January Window Open (Wk ${week}/24)`;
+  if (week < 20) return 'Window Closed (Opens Wk 20)';
+  return 'Window Closed (Opens Next Summer)';
+}
+
+const DOMESTIC_NATIONALITIES = new Set([
+  'England',
+  'Scotland',
+  'Wales',
+  'Ireland',
+  'Northern Ireland',
+]);
+
+export function evaluateOwnerSigningAlignment(
+  owner: Owner,
+  player: Player,
+  buyingClub: Club,
+  fee: number
+): OwnerAlignmentResult {
+  const budgetShare = buyingClub.transferBudget > 0 ? fee / buyingClub.transferBudget : 0;
+
+  if (owner.wealth === 'frugal' && fee > 0 && budgetShare > 0.45) {
+    return {
+      status: 'caution',
+      approvalDelta: -2,
+      trustDelta: -1,
+      oneLineExplanation: `${owner.name} (Frugal) balked at committing ${(budgetShare * 100).toFixed(0)}% of the transfer budget on ${player.name}.`,
+    };
+  }
+
+  switch (owner.recruitmentPhilosophy) {
+    case 'youth_development':
+      if (player.age <= 22) {
+        return {
+          status: 'aligned',
+          approvalDelta: 3,
+          trustDelta: 1,
+          oneLineExplanation: `${owner.name} welcomes ${player.name} (${player.age}) as a core Youth Development asset.`,
+        };
+      }
+      if (player.age >= 29) {
+        return {
+          status: 'mismatch',
+          approvalDelta: -3,
+          trustDelta: -2,
+          oneLineExplanation: `${owner.name} opposes signing ${player.age}-year-old ${player.name} under the Youth Development mandate.`,
+        };
+      }
+      return {
+        status: 'caution',
+        approvalDelta: 0,
+        trustDelta: 0,
+        oneLineExplanation: `${owner.name} accepts ${player.name} (${player.age}) as squad cover, though younger targets are preferred.`,
+      };
+
+    case 'marquee_stars':
+      if (player.overall >= 81) {
+        return {
+          status: 'aligned',
+          approvalDelta: 4,
+          trustDelta: 2,
+          oneLineExplanation: `${owner.name} celebrates landing ${player.name} (${player.overall} OVR) as a true Marquee Star.`,
+        };
+      }
+      if (fee > 0 && player.overall < (buyingClub.tier === 1 ? 76 : buyingClub.tier === 2 ? 69 : 61)) {
+        return {
+          status: 'mismatch',
+          approvalDelta: -2,
+          trustDelta: -1,
+          oneLineExplanation: `${owner.name} questions spending fees on ${player.name} (${player.overall} OVR) instead of statement talent.`,
+        };
+      }
+      return {
+        status: 'caution',
+        approvalDelta: 0,
+        trustDelta: 0,
+        oneLineExplanation: `${owner.name} views ${player.name} (${player.overall} OVR) as practical depth alongside marquee signings.`,
+      };
+
+    case 'moneyball_data': {
+      const valueRatio = player.value > 0 ? fee / player.value : 0;
+      if (fee === 0 || valueRatio <= 0.95) {
+        return {
+          status: 'aligned',
+          approvalDelta: 3,
+          trustDelta: 1,
+          oneLineExplanation: `${owner.name}'s analytics team applaud the value efficiency on ${player.name}.`,
+        };
+      }
+      if (valueRatio > 1.2) {
+        return {
+          status: 'mismatch',
+          approvalDelta: -3,
+          trustDelta: -2,
+          oneLineExplanation: `${owner.name} flagged paying ${(valueRatio * 100).toFixed(0)}% of valuation for ${player.name} as poor Moneyball ROI.`,
+        };
+      }
+      return {
+        status: 'caution',
+        approvalDelta: 0,
+        trustDelta: 0,
+        oneLineExplanation: `${owner.name}'s model rates ${player.name}'s fee as fair market value.`,
+      };
+    }
+
+    case 'domestic_grit':
+      if (DOMESTIC_NATIONALITIES.has(player.nationality)) {
+        return {
+          status: 'aligned',
+          approvalDelta: 3,
+          trustDelta: 1,
+          oneLineExplanation: `${owner.name} backs signing domestic ${player.nationality} core talent ${player.name}.`,
+        };
+      }
+      return {
+        status: 'mismatch',
+        approvalDelta: -2,
+        trustDelta: -1,
+        oneLineExplanation: `${owner.name} prefers UK & Irish grit over importing ${player.name} (${player.nationality}).`,
+      };
+
+    case 'trophies_now':
+      if (player.overall >= (buyingClub.tier === 1 ? 78 : buyingClub.tier === 2 ? 71 : 64)) {
+        return {
+          status: 'aligned',
+          approvalDelta: 3,
+          trustDelta: 1,
+          oneLineExplanation: `${owner.name} approves bringing in win-now starter ${player.name} (${player.overall} OVR).`,
+        };
+      }
+      if (player.age <= 20 && fee > 1_000_000) {
+        return {
+          status: 'mismatch',
+          approvalDelta: -2,
+          trustDelta: -1,
+          oneLineExplanation: `${owner.name} demands immediate-impact starters over long-term £${(fee / 1_000_000).toFixed(1)}M prospects.`,
+        };
+      }
+      return {
+        status: 'caution',
+        approvalDelta: 0,
+        trustDelta: 0,
+        oneLineExplanation: `${owner.name} expects ${player.name} to contribute immediately toward silverware.`,
+      };
+  }
+}
+
+export function getDelegationTrustPenalties(manager?: Manager): {
+  overrideSigning: number;
+  overrideSale: number;
+  sharedObjection: number;
+  sharedAgree: number;
+} {
+  if (!manager) {
+    return { overrideSigning: -20, overrideSale: -15, sharedObjection: -10, sharedAgree: 2 };
+  }
+  switch (manager.controlDesire) {
+    case 'autocrat':
+      return { overrideSigning: -28, overrideSale: -22, sharedObjection: -14, sharedAgree: 1 };
+    case 'head_coach':
+      return { overrideSigning: -12, overrideSale: -10, sharedObjection: -6, sharedAgree: 2 };
+    default:
+      return { overrideSigning: -20, overrideSale: -15, sharedObjection: -10, sharedAgree: 2 };
+  }
+}
+
+export function evaluatePlayerStyleFit(
+  manager: Manager | undefined,
+  player: Player
+): PlayerStyleFit {
+  if (!manager) {
+    return {
+      score: 0,
+      label: 'Neutral',
+      reason: 'No active Head Coach tactical blueprint.',
+      matchBonus: 0,
+      formBias: 0,
+    };
+  }
+
+  let score = 0;
+  const reasons: string[] = [];
+  const role = player.roleDetail || '';
+  const formation = manager.preferredFormation || '';
+
+  switch (manager.tacticalStyle) {
+    case 'High Gegenpress':
+      if (['Ball Winning Midfielder', 'Box to Box', 'Mezzala', 'Wingback', 'Inside Forward', 'Sweeper Keeper'].includes(role)) {
+        score += 2;
+        reasons.push(`${role} suits ${manager.tacticalStyle}`);
+      } else if (role === 'Target Forward' || role === 'Standard Keeper') {
+        score -= 1;
+        reasons.push(`${role} lacks pressing mobility`);
+      }
+      if (player.age <= 26) {
+        score += 1;
+        reasons.push('high-energy age profile');
+      } else if (player.age >= 32) {
+        score -= 1;
+        reasons.push('pressing load taxes legs over 31');
+      }
+      break;
+
+    case 'Tiki-Taka Possession':
+      if (['Sweeper Keeper', 'Ball-Playing Defender', 'Inverted Fullback', 'Inverted Wingback', 'Deep Lying Playmaker', 'Advanced Playmaker', 'False Nine'].includes(role)) {
+        score += 2;
+        reasons.push(`${role} excels in possession circuits`);
+      } else if (player.position === 'MID') {
+        score += 1;
+        reasons.push('natural midfield ball retention');
+      } else if (['Target Forward', 'Standard Keeper', 'Defensive Fullback'].includes(role)) {
+        score -= 1;
+        reasons.push(`${role} is less suited to short build-up`);
+      }
+      break;
+
+    case 'Direct Counter-Attack':
+      if (['Inside Forward', 'Winger', 'Advanced Forward', 'Deep Lying Playmaker', 'Box to Box'].includes(role)) {
+        score += 2;
+        reasons.push(`${role} thrives on vertical transitions`);
+      } else if (player.position === 'FWD' || player.position === 'DEF') {
+        score += 1;
+        reasons.push('direct transition fit');
+      } else if (role === 'False Nine') {
+        score -= 1;
+        reasons.push('False Nine slows vertical breaks');
+      }
+      break;
+
+    case 'Pragmatic Low Block':
+      if (['Standard Keeper', 'Central Defender', 'Defensive Fullback', 'Ball Winning Midfielder', 'Target Forward', 'Box to Box'].includes(role)) {
+        score += 2;
+        reasons.push(`${role} reinforces compact structure`);
+      } else if (['False Nine', 'Inverted Wingback', 'Attacking Midfielder'].includes(role)) {
+        score -= 1;
+        reasons.push(`${role} leaves spaces in a low block`);
+      }
+      if (player.age >= 27) {
+        score += 1;
+        reasons.push('tactical discipline');
+      } else if (player.age <= 20 && player.overall < 70) {
+        score -= 1;
+        reasons.push('raw for rigid defensive block');
+      }
+      break;
+
+    case 'Fluid Wing Play':
+      if (['Winger', 'Inside Forward', 'Wingback', 'Target Forward', 'Mezzala'].includes(role)) {
+        score += 2;
+        reasons.push(`${role} powers wide overloads`);
+      } else if (role === 'Ball-Playing Defender' || player.age <= 26) {
+        score += 1;
+        reasons.push('supports fluid wide progression');
+      } else if (role === 'Defensive Fullback') {
+        score -= 1;
+        reasons.push('conservative fullback limits width');
+      }
+      break;
+  }
+
+  // Formation role nuance
+  if (formation.startsWith('3-')) {
+    if (['Wide Center Back', 'Wingback', 'Inverted Wingback'].includes(role)) {
+      score += 1;
+      reasons.push(`natural ${formation.split(' ')[0]} specialist`);
+    } else if (role === 'Defensive Fullback') {
+      score -= 1;
+      reasons.push(`awkward fit for ${formation.split(' ')[0]} wingback shape`);
+    }
+  } else if (formation.startsWith('4-2-3-1') || formation.startsWith('4-4-1-1')) {
+    if (['Attacking Midfielder', 'Advanced Playmaker', 'Deep Lying Playmaker'].includes(role)) {
+      score += 1;
+      reasons.push(`made for ${formation.split(' ')[0]} central pockets`);
+    }
+  } else if (formation.startsWith('4-3-3')) {
+    if (['Inside Forward', 'Winger', 'Mezzala'].includes(role)) {
+      score += 1;
+      reasons.push(`tailored to ${formation.split(' ')[0]} channels`);
+    }
+  } else if (formation.startsWith('4-4-2') || formation.startsWith('4-2-2-2')) {
+    if (['Target Forward', 'Advanced Forward', 'Box to Box'].includes(role)) {
+      score += 1;
+      reasons.push(`suited to ${formation.split(' ')[0]} two-striker structure`);
+    }
+  }
+
+  // Growth momentum sharpness nudge for proactive styles
+  if (
+    (player.growthMomentum === 'breakout' || player.growthMomentum === 'prime') &&
+    score >= 1
+  ) {
+    reasons.push(`${player.growthMomentum} momentum`);
+  }
+
+  const clampedScore = Math.max(-3, Math.min(3, score));
+  const label: PlayerStyleFit['label'] =
+    clampedScore >= 2 ? 'Ideal Fit' : clampedScore === 1 ? 'Strong Fit' : clampedScore === 0 ? 'Neutral' : 'Misfit';
+
+  const matchBonus =
+    clampedScore >= 2
+      ? 1.1
+      : clampedScore === 1
+        ? 0.55
+        : clampedScore === 0
+          ? 0
+          : Math.max(-0.6, clampedScore * 0.28);
+
+  const formBias =
+    clampedScore >= 2
+      ? 0.30
+      : clampedScore === 1
+        ? 0.15
+        : clampedScore === 0
+          ? 0
+          : Math.max(-0.25, clampedScore * 0.12);
+
+  const reason =
+    reasons.length > 0
+      ? reasons.slice(0, 2).join(' · ')
+      : `Balanced ${role || player.position} profile for ${manager.tacticalStyle}`;
+
+  return {
+    score: clampedScore,
+    label,
+    reason: reason.charAt(0).toUpperCase() + reason.slice(1),
+    matchBonus,
+    formBias,
+  };
+}
 
 export function capTransferHistory(records: TransferRecord[]): TransferRecord[] {
   if (records.length <= MAX_TRANSFER_HISTORY_RECORDS) return records;
@@ -69,7 +406,7 @@ export function parseFormation(formation?: string): { def: number; mid: number; 
   return { def: 4, mid: 4, fwd: 2 };
 }
 
-// Select starting XI from club.lineup (or autoPickLineup for AI/missing lineups) with getSlotFit penalties
+// Select starting XI from club.lineup (or autoPickLineup for AI/missing lineups)
 export function selectStartingXI(
   club: Club,
   manager?: Manager,
@@ -110,7 +447,7 @@ export interface EvaluateSigningParams {
 export interface EvaluateSigningResult {
   ok: boolean;
   reason?: string;
-  failStage?: 'squad_cap' | 'budget' | 'selling_club' | 'wage_budget' | 'player_terms' | 'owner_veto';
+  failStage?: 'availability' | 'squad_cap' | 'budget' | 'selling_club' | 'wage_budget' | 'player_terms' | 'owner_veto';
   vetoedByOwner?: boolean;
 }
 
@@ -134,6 +471,22 @@ export function evaluateSigning({
       ok: false,
       failStage: 'player_terms',
       reason: 'TERMS FAILED: Enter a valid weekly wage offer.',
+    };
+  }
+
+  // 0. Injury / Retirement availability checks
+  if (player.isInjured) {
+    return {
+      ok: false,
+      failStage: 'availability',
+      reason: `MEDICAL FAILED: ${player.name} is injured (${player.injuryWeeks || 1}w out) and cannot complete a transfer.`,
+    };
+  }
+  if (player.retiringAtSeasonEnd) {
+    return {
+      ok: false,
+      failStage: 'availability',
+      reason: `DEAL BLOCKED: ${player.name} has announced his retirement at the end of the season.`,
     };
   }
 
@@ -193,23 +546,81 @@ export function evaluateSigning({
     };
   }
 
-  // 6. Owner & Board Veto checks
-  if (owner.recruitmentPhilosophy === 'youth_development' && player.age >= 30 && owner.involvement === 'micromanager') {
+  // 6. Owner & Board Veto checks driven by involvement, wealth & recruitmentPhilosophy
+  const frugalLimit = owner.involvement === 'micromanager' ? 0.50 : owner.involvement === 'hands_off' ? 0.75 : 0.60;
+  if (owner.wealth === 'frugal' && fee > 0 && fee > buyingClub.transferBudget * frugalLimit) {
     return {
       ok: false,
       failStage: 'owner_veto',
       vetoedByOwner: true,
-      reason: `OWNER VETO: Chairman ${owner.name} has blocked the deal! "Our philosophy strictly prohibits signing players over 29 years old. We are an academy and youth resale institution."`,
+      reason: `BOARD VETO (${owner.name}): Frugal spending cap forbids putting over ${Math.round(frugalLimit * 100)}% of your transfer chest into a single player.`,
     };
   }
 
-  if (owner.wealth === 'frugal' && fee > buyingClub.transferBudget * 0.6) {
-    return {
-      ok: false,
-      failStage: 'owner_veto',
-      vetoedByOwner: true,
-      reason: `BOARD VETO: The financial committee vetoed the fee! Spending 60%+ of the transfer war chest on one individual violates board risk metrics.`,
-    };
+  if (owner.involvement === 'micromanager') {
+    if (owner.recruitmentPhilosophy === 'youth_development' && player.age >= 29 && (fee > 0 || wage > buyingClub.wageBudget * 0.05)) {
+      return {
+        ok: false,
+        failStage: 'owner_veto',
+        vetoedByOwner: true,
+        reason: `OWNER VETO (${owner.name}): Youth Development mandate forbids committing major budget to players aged 29+.`,
+      };
+    }
+    const marqueeFloor = buyingClub.tier === 1 ? 75 : buyingClub.tier === 2 ? 68 : 60;
+    if (owner.recruitmentPhilosophy === 'marquee_stars' && fee > 0 && player.overall < marqueeFloor) {
+      return {
+        ok: false,
+        failStage: 'owner_veto',
+        vetoedByOwner: true,
+        reason: `OWNER VETO (${owner.name}): Marquee Stars policy blocks spending transfer fees on players rated below ${marqueeFloor} OVR.`,
+      };
+    }
+    if (owner.recruitmentPhilosophy === 'moneyball_data' && fee > 0 && player.value > 0 && fee > player.value * 1.25) {
+      return {
+        ok: false,
+        failStage: 'owner_veto',
+        vetoedByOwner: true,
+        reason: `OWNER VETO (${owner.name}): Moneyball analytics blocked paying over 125% of ${player.name}'s £${(player.value / 1000000).toFixed(1)}M fair value.`,
+      };
+    }
+    if (owner.recruitmentPhilosophy === 'domestic_grit' && !DOMESTIC_NATIONALITIES.has(player.nationality)) {
+      const domesticRatio = buyingClub.squad.length > 0
+        ? buyingClub.squad.filter(p => DOMESTIC_NATIONALITIES.has(p.nationality)).length / buyingClub.squad.length
+        : 1;
+      if (domesticRatio < 0.5) {
+        return {
+          ok: false,
+          failStage: 'owner_veto',
+          vetoedByOwner: true,
+          reason: `OWNER VETO (${owner.name}): Domestic Grit mandate requires lifting your UK/Irish squad core above 50% before signing overseas players.`,
+        };
+      }
+    }
+    if (owner.recruitmentPhilosophy === 'trophies_now' && player.age <= 20 && player.overall < 70 && fee > 1_000_000) {
+      return {
+        ok: false,
+        failStage: 'owner_veto',
+        vetoedByOwner: true,
+        reason: `OWNER VETO (${owner.name}): Trophies Now policy blocks spending £1M+ on developmental U20s below 70 OVR.`,
+      };
+    }
+  } else if (owner.involvement === 'collaborative') {
+    if (owner.recruitmentPhilosophy === 'youth_development' && player.age >= 31 && fee > 0) {
+      return {
+        ok: false,
+        failStage: 'owner_veto',
+        vetoedByOwner: true,
+        reason: `OWNER VETO (${owner.name}): Youth Development board blocked paying a fee for 31+ veteran ${player.name}.`,
+      };
+    }
+    if (owner.recruitmentPhilosophy === 'moneyball_data' && fee > 0 && player.value > 0 && fee > player.value * 1.4) {
+      return {
+        ok: false,
+        failStage: 'owner_veto',
+        vetoedByOwner: true,
+        reason: `OWNER VETO (${owner.name}): Moneyball committee blocked overpaying by more than 40% above valuation.`,
+      };
+    }
   }
 
   return { ok: true };
@@ -264,6 +675,11 @@ export function completeSigning({
   note,
   trustDelta = 0,
 }: CompleteSigningParams): CompleteSigningResult {
+  if (buyingClub.squad.length >= 25) {
+    throw new Error(`${buyingClub.name} already has a full 25-man squad.`);
+  }
+
+  const ownerAlignment = evaluateOwnerSigningAlignment(owner, player, buyingClub, fee);
   const signedPlayer: Player = {
     ...player,
     clubId: buyingClub.id,
@@ -314,12 +730,12 @@ export function completeSigning({
     ...director,
     netSpend: director.netSpend + fee,
     reputation: Math.min(100, director.reputation + (signedPlayer.overall > 82 ? 3 : 1)),
-    boardTrust: Math.min(100, director.boardTrust + 2),
+    boardTrust: Math.max(0, Math.min(100, director.boardTrust + 2 + ownerAlignment.trustDelta)),
   };
 
   const updatedOwner: Owner = {
     ...owner,
-    approval: Math.min(100, owner.approval + 2),
+    approval: Math.max(0, Math.min(100, owner.approval + 2 + ownerAlignment.approvalDelta)),
   };
 
   const updatedManager = manager
@@ -345,7 +761,7 @@ export function completeSigning({
     wage,
     contractYears,
     initiatedBy,
-    note,
+    note: note || ownerAlignment.oneLineExplanation,
   };
 
   return {
@@ -382,7 +798,10 @@ export function getTransferOffers(
   clubs: Club[],
   sellerClubId: string
 ): GeneratedTransferOffer[] {
+  if (player.isInjured || player.retiringAtSeasonEnd) return [];
+
   const offers: GeneratedTransferOffer[] = [];
+  const offeredWage = Math.round(player.wage * 1.1);
 
   for (const buyer of clubs) {
     if (buyer.id === sellerClubId) continue;
@@ -401,12 +820,14 @@ export function getTransferOffers(
     const clampedFactor = Math.max(0.85, Math.min(1.2, rawFactor));
     const fee = Math.max(50000, Math.round(player.value * clampedFactor));
 
-    if (buyer.transferBudget < fee) continue;
+    if (buyer.transferBudget < fee || buyer.balance < fee) continue;
+    const currentBuyerWages = buyer.squad.reduce((sum, p) => sum + p.wage, 0);
+    if (currentBuyerWages + offeredWage > buyer.wageBudget) continue;
 
     offers.push({
       club: buyer,
       fee,
-      wage: Math.round(player.wage * 1.1),
+      wage: offeredWage,
     });
   }
 
@@ -453,6 +874,13 @@ export function completeSale({
   note,
   trustDelta = 0,
 }: CompleteSaleParams): CompleteSaleResult {
+  if (buyingClub.squad.length >= 25) {
+    throw new Error(`${buyingClub.name} already has a full 25-man squad.`);
+  }
+  if (!sellerClub.squad.some(p => p.id === player.id)) {
+    throw new Error(`${player.name} is no longer registered at ${sellerClub.name}.`);
+  }
+
   const contractYears = 3;
   const agreedWage = wage ?? Math.round(player.wage * 1.1);
 
@@ -555,13 +983,21 @@ export function evaluateDirectorSigningDelegation(
     return { requiresConfirm: false, mode: 'director', trustDelta: 0 };
   }
 
+  const penalties = getDelegationTrustPenalties(manager);
+
   if (delegation.transferSignings === 'manager') {
+    const styleNote =
+      manager.controlDesire === 'autocrat'
+        ? ` Autocrat coaches react harshly to boardroom interference.`
+        : manager.controlDesire === 'head_coach'
+          ? ` As a flexible Head Coach, ${manager.name} will absorb this more calmly.`
+          : '';
     return {
       requiresConfirm: true,
       mode: 'manager',
-      trustDelta: -20,
+      trustDelta: penalties.overrideSigning,
       title: 'Manager Control Override',
-      reason: `Overriding your Head Coach (${manager.name}) on incoming signings will cost 20 trust.`,
+      reason: `Overriding your Head Coach (${manager.name}) on incoming signings will cost ${Math.abs(penalties.overrideSigning)} trust.${styleNote}`,
     };
   }
 
@@ -578,7 +1014,7 @@ export function evaluateDirectorSigningDelegation(
     return {
       requiresConfirm: false,
       mode: 'shared_agreed',
-      trustDelta: 1,
+      trustDelta: penalties.sharedAgree,
       reason: belowMinDepth
         ? `${manager.name} agrees: we are short at ${targetPlayer.position} (${posCount}/${MIN_POSITION_DEPTH[targetPlayer.position]} min).`
         : `${manager.name} agrees: ${targetPlayer.name} (${targetPlayer.overall} OVR) fits our first-team standard.`,
@@ -588,9 +1024,9 @@ export function evaluateDirectorSigningDelegation(
   return {
     requiresConfirm: true,
     mode: 'shared_objected',
-    trustDelta: -10,
+    trustDelta: penalties.sharedObjection,
     title: `${manager.name} Objects to Signing`,
-    reason: `${manager.name} objects: we already have ${posCount} ${targetPlayer.position} players and ${targetPlayer.name} (${targetPlayer.overall} OVR) sits more than 2 points below our weakest starter (${weakestStarterOvr} OVR).`,
+    reason: `${manager.name} objects (-${Math.abs(penalties.sharedObjection)} trust): we already have ${posCount} ${targetPlayer.position} players and ${targetPlayer.name} (${targetPlayer.overall} OVR) sits more than 2 points below our weakest starter (${weakestStarterOvr} OVR).`,
   };
 }
 
@@ -604,13 +1040,19 @@ export function evaluateDirectorSaleDelegation(
     return { requiresConfirm: false, mode: 'director', trustDelta: 0 };
   }
 
+  const penalties = getDelegationTrustPenalties(manager);
+
   if (delegation.transferSales === 'manager') {
+    const styleNote =
+      manager.controlDesire === 'autocrat'
+        ? ` Autocrat coaches strongly resent forced departures.`
+        : '';
     return {
       requiresConfirm: true,
       mode: 'manager',
-      trustDelta: -15,
+      trustDelta: penalties.overrideSale,
       title: 'Manager Control Override',
-      reason: `Overriding your Head Coach (${manager.name}) on player sales will cost 15 trust.`,
+      reason: `Overriding your Head Coach (${manager.name}) on player sales will cost ${Math.abs(penalties.overrideSale)} trust.${styleNote}`,
     };
   }
 
@@ -624,7 +1066,7 @@ export function evaluateDirectorSaleDelegation(
     return {
       requiresConfirm: false,
       mode: 'shared_agreed',
-      trustDelta: 1,
+      trustDelta: penalties.sharedAgree,
       reason: `${manager.name} agrees to sanction the sale of squad player ${player.name}.`,
     };
   }
@@ -640,18 +1082,20 @@ export function evaluateDirectorSaleDelegation(
   return {
     requiresConfirm: true,
     mode: 'shared_objected',
-    trustDelta: -10,
+    trustDelta: penalties.sharedObjection,
     title: `${manager.name} Objects to Sale`,
-    reason: `${manager.name} objects: ${reasons.join(' and ')}.`,
+    reason: `${manager.name} objects (-${Math.abs(penalties.sharedObjection)} trust): ${reasons.join(' and ')}.`,
   };
 }
 
 export function expireTransferProposals(
   proposals: TransferProposal[],
-  currentWeek: number
+  currentWeek: number,
+  closeIfWindowClosed = false
 ): TransferProposal[] {
+  const windowShut = closeIfWindowClosed && !isTransferWindowOpen(currentWeek);
   return proposals.map(p =>
-    p.status === 'pending' && currentWeek >= p.expiresWeek
+    p.status === 'pending' && (currentWeek >= p.expiresWeek || windowShut)
       ? { ...p, status: 'expired' as const }
       : p
   );
@@ -802,20 +1246,7 @@ export function verifyManagerDeal({
 }
 
 function getStyleBonus(manager: Manager, player: Player): number {
-  switch (manager.tacticalStyle) {
-    case 'High Gegenpress':
-      return player.age <= 27 ? 2 : 0;
-    case 'Tiki-Taka Possession':
-      return player.position === 'MID' ? 1 : 0;
-    case 'Direct Counter-Attack':
-      return player.position === 'FWD' || player.position === 'DEF' ? 1 : 0;
-    case 'Pragmatic Low Block':
-      return player.age >= 27 ? 2 : 0;
-    case 'Fluid Wing Play':
-      return player.age <= 26 ? 1 : 0;
-    default:
-      return 0;
-  }
+  return evaluatePlayerStyleFit(manager, player).score;
 }
 
 function getOwnerPhilosophyBonus(owner: Owner, player: Player): number {
@@ -874,8 +1305,7 @@ export function runManagerTransferActivity({
 
   // Never runs in weeks 44+ or outside active transfer windows (Weeks 1-6, 20-24)
   if (currentWeek >= 44) return noOp;
-  const isWindowOpen = currentWeek <= 6 || (currentWeek >= 20 && currentWeek <= 24);
-  if (!isWindowOpen) return noOp;
+  if (!isTransferWindowOpen(currentWeek)) return noOp;
 
   const signingsDelegated = delegation.transferSignings === 'manager' || delegation.transferSignings === 'shared';
   const salesDelegated = delegation.transferSales === 'manager' || delegation.transferSales === 'shared';
@@ -941,6 +1371,7 @@ export function runManagerTransferActivity({
     };
 
     const saleCandidates = club.squad.filter(p => {
+      if (p.isInjured || p.retiringAtSeasonEnd) return false;
       if (starterIds.has(p.id)) return false; // NEVER sells a starting-XI player
       if (posCounts[p.position] - 1 < MIN_POSITION_DEPTH[p.position]) return false; // NEVER below min depth
       if (pendingPlayerIds.has(p.id)) return false;
@@ -1135,10 +1566,10 @@ export function runManagerTransferActivity({
       priorityDepth: boolean;
       upgradeMargin: number;
     }> = [];
-    let skippedVetoedTargetName: string | null = null;
+    let skippedVetoReason: string | null = null;
 
     const considerCandidate = (p: Player, sellingClub: Club | null) => {
-      if (p.isInjured) return;
+      if (p.isInjured || p.retiringAtSeasonEnd) return;
       if (pendingPlayerIds.has(p.id)) return;
       if (sellingClub && sellingClub.id === targetClubId) return;
 
@@ -1153,8 +1584,16 @@ export function runManagerTransferActivity({
       const minValidWage = Math.max(1000, Math.ceil(p.wage * 0.85));
       if (minValidWage > wageSpace) return;
 
-      if (owner.recruitmentPhilosophy === 'youth_development' && p.age >= 30 && owner.involvement === 'micromanager') {
-        if (!skippedVetoedTargetName) skippedVetoedTargetName = p.name;
+      const preCheck = evaluateSigning({
+        player: p,
+        sellingClub,
+        buyingClub: club,
+        owner,
+        fee: minAcceptableFee,
+        wage: minValidWage,
+      });
+      if (!preCheck.ok && preCheck.vetoedByOwner) {
+        if (!skippedVetoReason) skippedVetoReason = preCheck.reason || `${owner.name} blocked a move for ${p.name}`;
         return;
       }
 
@@ -1181,12 +1620,12 @@ export function runManagerTransferActivity({
     }
 
     if (candidates.length === 0) {
-      if (skippedVetoedTargetName) {
+      if (skippedVetoReason) {
         return {
           ...noOp,
           pressHeadlines: [
             {
-              title: `Board blocks Head Coach's move for ${skippedVetoedTargetName}`,
+              title: skippedVetoReason,
               source: 'The Boardroom Wire',
               category: 'transfer',
               sentiment: 'negative',
@@ -1235,7 +1674,7 @@ export function runManagerTransferActivity({
         if (evalResult.vetoedByOwner && !loggedVeto) {
           loggedVeto = true;
           pressHeadlines.push({
-            title: `Board blocks Head Coach's move for ${candidate.player.name}`,
+            title: evalResult.reason || `${owner.name} blocked Head Coach's move for ${candidate.player.name}`,
             source: 'The Boardroom Wire',
             category: 'transfer',
             sentiment: 'negative',

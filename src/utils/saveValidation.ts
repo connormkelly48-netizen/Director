@@ -1,5 +1,5 @@
 export const SAVE_STORAGE_KEY = 'the_boardroom_save_v2';
-export const CURRENT_SAVE_VERSION = 2;
+export const CURRENT_SAVE_VERSION = 3;
 
 export interface SaveValidationResult {
   ok: boolean;
@@ -34,10 +34,10 @@ export function validateSaveJson(saveJson: string): SaveValidationResult {
     };
   }
 
-  if (record.saveVersion !== CURRENT_SAVE_VERSION) {
+  if (record.saveVersion !== 2 && record.saveVersion !== CURRENT_SAVE_VERSION) {
     return {
       ok: false,
-      error: `Incompatible save version (${record.saveVersion}). Expected version ${CURRENT_SAVE_VERSION}.`,
+      error: `Incompatible save version (${record.saveVersion}). Expected versions 2 or ${CURRENT_SAVE_VERSION}.`,
     };
   }
 
@@ -62,13 +62,30 @@ export function validateSaveJson(saveJson: string): SaveValidationResult {
     };
   }
 
+  const isManagerMode = record.gameMode === 'manager';
   const director = record.director;
-  if (
-    !director ||
-    typeof director !== 'object' ||
-    Array.isArray(director) ||
-    typeof (director as Record<string, unknown>).name !== 'string'
-  ) {
+  const hasValidDirector =
+    Boolean(director) &&
+    typeof director === 'object' &&
+    !Array.isArray(director) &&
+    typeof (director as Record<string, unknown>).name === 'string';
+
+  const managerCareer = record.managerCareer;
+  const hasValidManagerCareer =
+    Boolean(managerCareer) &&
+    typeof managerCareer === 'object' &&
+    !Array.isArray(managerCareer) &&
+    Boolean((managerCareer as Record<string, unknown>).profile) &&
+    typeof ((managerCareer as Record<string, unknown>).profile as Record<string, unknown>).name === 'string';
+
+  if (isManagerMode) {
+    if (!hasValidManagerCareer) {
+      return {
+        ok: false,
+        error: 'Invalid save file: missing Manager Mode career profile.',
+      };
+    }
+  } else if (!hasValidDirector) {
     return {
       ok: false,
       error: 'Invalid save file: missing director profile.',

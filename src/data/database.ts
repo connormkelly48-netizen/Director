@@ -14,6 +14,9 @@ import {
   Player,
   TakeoverCandidate,
 } from '../types/game';
+import { getManagerCareerStats } from '../services/managerService';
+import { replenishClubAcademy } from '../services/simulationEngine';
+import { YOUTH_ACADEMY_CONFIG } from '../config/youthAcademyConfig';
 
 interface RawAcademyPlayer extends AcademyPlayer {
   clubId: string;
@@ -74,32 +77,46 @@ export function loadDatabase(): {
     const { clubId, ...academyRecord } = prospect;
     if (clubId) {
       const list = academyByClub.get(clubId) || [];
-      list.push(academyRecord);
+      list.push({ ...academyRecord, clubId, origin: academyRecord.origin ?? 'generated' });
       academyByClub.set(clubId, list);
     }
   }
 
-  const clubs: Club[] = cloned.clubs.map((c) => ({
-    ...c,
-    tier: c.tier as LeagueTier,
-    squad: playersByClub.get(c.id) || [],
-    academy: academyByClub.get(c.id) || [],
-    played: 0,
-    won: 0,
-    drawn: 0,
-    lost: 0,
-    goalsFor: 0,
-    goalsAgainst: 0,
-    goalDifference: 0,
-    points: 0,
-    form: [],
-  }));
+  const usedAcademyNames = new Set<string>(
+    cloned.academy.map((p) => p.name)
+  );
+
+  const clubs: Club[] = cloned.clubs.map((c) => {
+    const baseClub: Club = {
+      ...c,
+      tier: c.tier as LeagueTier,
+      squad: playersByClub.get(c.id) || [],
+      academy: academyByClub.get(c.id) || [],
+      played: 0,
+      won: 0,
+      drawn: 0,
+      lost: 0,
+      goalsFor: 0,
+      goalsAgainst: 0,
+      goalDifference: 0,
+      points: 0,
+      form: [],
+    };
+    return {
+      ...baseClub,
+      academy: replenishClubAcademy(baseClub, cloned.meta.startSeason, usedAcademyNames),
+    };
+  });
 
   const owners: Owner[] = cloned.owners
     .filter((o) => o.status === 'current')
     .map(({ status: _status, ...owner }) => owner);
 
-  const managers: Manager[] = cloned.managers;
+  const managers: Manager[] = cloned.managers.map((m) => ({
+    ...m,
+    careerStats: getManagerCareerStats(m),
+    history: Array.isArray(m.history) ? m.history : [],
+  }));
 
   // Quick sanity check on counts and referential integrity
   const ownerIds = new Set(owners.map((o) => o.id));
@@ -128,8 +145,8 @@ export function loadDatabase(): {
     if (!club.managerId || !managerIds.has(club.managerId)) {
       console.warn(`[database] Club ${club.id} is missing valid manager (${club.managerId})`);
     }
-    if (!club.academy || club.academy.length !== 5) {
-      console.warn(`[database] Club ${club.id} expected 5 academy players, got ${club.academy?.length ?? 0}`);
+    if (!club.academy || club.academy.length < YOUTH_ACADEMY_CONFIG.generatedSlots) {
+      console.warn(`[database] Club ${club.id} expected at least ${YOUTH_ACADEMY_CONFIG.generatedSlots} academy players, got ${club.academy?.length ?? 0}`);
     }
   }
 

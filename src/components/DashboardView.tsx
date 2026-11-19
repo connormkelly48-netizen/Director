@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { Club, Director, Owner, Manager, LeagueTier, GameweekRecord, Player, TransferRecord } from '../types/game';
+import { Club, ClubDirector, Director, GameMode, GameweekRecord, LeagueTier, Manager, ManagerCareerState, Owner, Player, TransferRecord } from '../types/game';
 import { 
   Shield, 
   TrendingUp, 
@@ -24,17 +24,24 @@ import {
   ChevronDown,
   ChevronUp,
   Briefcase,
+  Building2,
+  LogOut,
 } from 'lucide-react';
 import { sounds } from '../services/soundEffects';
 import { FORMATIONS } from '../data/formations';
 import { computeTeamRating, resolveClubLineup } from '../utils/lineup';
 import { computeTransferROI } from '../utils/transferRoi';
+import { MANAGER_MODE_CONFIG } from '../config/managerModeConfig';
+import { calculateEffectiveControl } from '../services/managerModeService';
 import { TransferROICard } from './dashboard/TransferROICard';
 import { TransferROIModal } from './dashboard/TransferROIModal';
 
 interface DashboardViewProps {
+  gameMode?: GameMode;
   club: Club | undefined;
   director: Director;
+  managerCareer?: ManagerCareerState | null;
+  clubDirector?: ClubDirector;
   owner: Owner | undefined;
   manager: Manager | undefined;
   allClubs: Club[];
@@ -45,6 +52,8 @@ interface DashboardViewProps {
   gameweekHistory?: GameweekRecord[];
   onNavigate: (tab: string) => void;
   onAdvanceWeek: () => void;
+  onRetireManager?: () => void;
+  onBecomeSportingDirector?: () => void;
   isSimulating: boolean;
 }
 
@@ -270,8 +279,11 @@ const StandingsTableRow = React.memo<StandingsTableRowProps>(({
 StandingsTableRow.displayName = 'StandingsTableRow';
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
+  gameMode = 'director',
   club,
   director,
+  managerCareer = null,
+  clubDirector,
   owner,
   manager,
   allClubs,
@@ -282,8 +294,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   gameweekHistory = [],
   onNavigate,
   onAdvanceWeek,
+  onRetireManager,
+  onBecomeSportingDirector,
   isSimulating,
 }) => {
+  const isManagerMode = gameMode === 'manager';
   const isSeasonComplete = currentWeek > 46;
   const maxWeek = Math.max(1, Math.min(46, currentWeek));
   const displayWeek = Math.min(46, currentWeek);
@@ -848,32 +863,142 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </div>
 
-        {/* Manager Relationship */}
-        <div className="bg-[#111827] border border-white/10 rounded-xl p-4">
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center gap-2">
-              <Users className="w-4 h-4 text-blue-400" />
-              <span className="text-xs font-semibold text-slate-300">Head Coach Synergy</span>
+        {/* Card 3: Manager Relationship (Director Mode) OR Sporting Director Dynamic (Manager Mode) */}
+        {isManagerMode && managerCareer && clubDirector ? (
+          (() => {
+            const effectiveCtrl = calculateEffectiveControl(
+              clubDirector.personality,
+              managerCareer.profile.reputation,
+              managerCareer.controlModifier || 0
+            );
+            return (
+              <button
+                type="button"
+                onClick={() => {
+                  sounds.playClick();
+                  onNavigate('manager_director');
+                }}
+                className="bg-[#111827] hover:bg-slate-900/90 border border-white/10 hover:border-amber-400/40 rounded-xl p-4 text-left transition-colors cursor-pointer"
+              >
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <Users className="w-4 h-4 text-blue-400" />
+                    <span className="text-xs font-semibold text-slate-300">Sporting Director</span>
+                  </div>
+                  <span className="text-xs font-mono font-bold text-amber-300 tabular-nums">
+                    {effectiveCtrl}% Control
+                  </span>
+                </div>
+                <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden mb-2">
+                  <div
+                    className="h-full transition-all duration-300 bg-blue-400"
+                    style={{ width: `${effectiveCtrl}%` }}
+                  />
+                </div>
+                <div className="flex items-center justify-between text-xs sm:text-[11px] text-slate-400 gap-2">
+                  <span className="truncate">{clubDirector.name}</span>
+                  <span className="text-slate-300 font-medium shrink-0">
+                    {MANAGER_MODE_CONFIG.directors[clubDirector.personality].shortLabel}
+                  </span>
+                </div>
+              </button>
+            );
+          })()
+        ) : (
+          <div className="bg-[#111827] border border-white/10 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <Users className="w-4 h-4 text-blue-400" />
+                <span className="text-xs font-semibold text-slate-300">Head Coach Synergy</span>
+              </div>
+              <span className="text-xs font-mono font-bold text-white tabular-nums">
+                {manager ? `${manager.trustInDirector}%` : 'Vacant'}
+              </span>
             </div>
-            <span className="text-xs font-mono font-bold text-white tabular-nums">
-              {manager ? `${manager.trustInDirector}%` : 'Vacant'}
-            </span>
+            <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden mb-2">
+              <div 
+                className={`h-full transition-all duration-300 ${
+                  (manager?.trustInDirector || 0) > 65 ? 'bg-emerald-400' : (manager?.trustInDirector || 0) > 40 ? 'bg-amber-400' : 'bg-rose-500'
+                }`}
+                style={{ width: `${manager?.trustInDirector || 0}%` }}
+              />
+            </div>
+            <div className="flex items-center justify-between text-xs sm:text-[11px] text-slate-400 gap-2">
+              <span>{manager ? manager.name : 'No Manager Hired'}</span>
+              <span className="capitalize text-slate-300 font-medium">{manager?.controlDesire || 'N/A'}</span>
+            </div>
           </div>
-          <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden mb-2">
-            <div 
-              className={`h-full transition-all duration-300 ${
-                (manager?.trustInDirector || 0) > 65 ? 'bg-emerald-400' : (manager?.trustInDirector || 0) > 40 ? 'bg-amber-400' : 'bg-rose-500'
-              }`}
-              style={{ width: `${manager?.trustInDirector || 0}%` }}
-            />
-          </div>
-          <div className="flex items-center justify-between text-xs sm:text-[11px] text-slate-400 gap-2">
-            <span>{manager ? manager.name : 'No Manager Hired'}</span>
-            <span className="capitalize text-slate-300 font-medium">{manager?.controlDesire || 'N/A'}</span>
-          </div>
-        </div>
+        )}
 
       </div>
+
+      {/* Manager Mode Career Actions Bar (Director / Become Sporting Director / Retire) */}
+      {isManagerMode && managerCareer && (
+        <div className="bg-[#111827] border border-white/10 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">
+                Manager Career · Age {managerCareer.profile.age} · {managerCareer.profile.tacticalStyle}
+              </span>
+              {managerCareer.currentClubId && (
+                <span
+                  className={`px-2 py-0.5 rounded border text-[11px] font-mono font-bold ${
+                    managerCareer.contractYears <= 1
+                      ? 'bg-amber-500/15 border-amber-400/40 text-amber-300'
+                      : 'bg-slate-900 border-white/10 text-slate-200'
+                  }`}
+                >
+                  Contract: {managerCareer.contractYears}y · £{(managerCareer.weeklyWage / 1000).toFixed(1)}k/wk
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-slate-400 mt-0.5">
+              {clubDirector
+                ? MANAGER_MODE_CONFIG.directors[clubDirector.personality].description
+                : 'Manage tactics, lineup, and transfer target requests.'}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                sounds.playClick();
+                onNavigate('manager_director');
+              }}
+              className="min-h-11 lg:min-h-0 px-3.5 py-2 rounded-xl bg-amber-400/15 hover:bg-amber-400/25 border border-amber-400/35 text-amber-300 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+            >
+              <span>Director &amp; Contract</span>
+              <ArrowUpRight className="w-3.5 h-3.5" />
+            </button>
+            {onBecomeSportingDirector && (
+              <button
+                type="button"
+                onClick={() => {
+                  sounds.playClick();
+                  onBecomeSportingDirector();
+                }}
+                className="min-h-11 lg:min-h-0 px-3.5 py-2 rounded-xl bg-blue-500/15 hover:bg-blue-500/25 border border-blue-500/35 text-blue-300 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+              >
+                <Building2 className="w-3.5 h-3.5" />
+                <span>Become Sporting Director</span>
+              </button>
+            )}
+            {onRetireManager && (
+              <button
+                type="button"
+                onClick={() => {
+                  sounds.playCrisis();
+                  onRetireManager();
+                }}
+                className="min-h-11 lg:min-h-0 px-3.5 py-2 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/35 text-rose-300 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>Retire</span>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Financial Ledger & Transfer ROI Row */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
@@ -924,18 +1049,20 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
               <div>
                 <span className="text-xs sm:text-[11px] text-slate-400 uppercase tracking-wider block mb-1">
-                  Director Reputation
+                  {isManagerMode ? 'Manager Reputation' : 'Director Reputation'}
                 </span>
                 <span className="text-lg lg:text-xl font-bold font-mono tabular-nums text-blue-400">
-                  {director.reputation} / 100
+                  {isManagerMode && managerCareer ? managerCareer.profile.reputation : director.reputation} / 100
                 </span>
-                <span className="text-xs sm:text-[10px] text-slate-500 block mt-0.5">Global executive pedigree</span>
+                <span className="text-xs sm:text-[10px] text-slate-500 block mt-0.5">
+                  {isManagerMode ? 'Touchline standing & club stature' : 'Global executive pedigree'}
+                </span>
               </div>
             </div>
           </div>
         </div>
 
-        {transferRoiSummary && (
+        {!isManagerMode && transferRoiSummary && (
           <div className="lg:col-span-5">
             <TransferROICard
               summary={transferRoiSummary}
@@ -1500,9 +1627,20 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           ))}
         </div>
 
-        <div className="border-t border-white/10 pt-3 mt-4 text-xs sm:text-[11px] text-slate-400 flex items-center justify-between">
+        <div className="border-t border-white/10 pt-3 mt-4 text-xs sm:text-[11px] text-slate-400 flex items-center justify-between gap-2">
           <span>Active Injuries: {activeInjuriesCount}</span>
-          <span>Squad Morale: <strong className="text-emerald-400 font-semibold">High</strong></span>
+          {(() => {
+            const avgHappiness = club.squad.length > 0
+              ? Math.round(club.squad.reduce((sum, p) => sum + p.happiness, 0) / club.squad.length)
+              : 70;
+            const moraleLabel = avgHappiness >= 75 ? 'High' : avgHappiness >= 58 ? 'Steady' : avgHappiness >= 42 ? 'Fragile' : 'Low';
+            const moraleClass = avgHappiness >= 75 ? 'text-emerald-400' : avgHappiness >= 58 ? 'text-amber-300' : 'text-rose-400';
+            return (
+              <span>
+                Squad Morale: <strong className={`${moraleClass} font-semibold`}>{moraleLabel} ({avgHappiness}%)</strong>
+              </span>
+            );
+          })()}
         </div>
       </div>
 

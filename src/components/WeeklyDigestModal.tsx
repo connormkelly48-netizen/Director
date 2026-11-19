@@ -271,6 +271,15 @@ export const WeeklyDigestModal: React.FC<WeeklyDigestModalProps> = ({
               <span>{digest.boardroomMemo.impactExplanation}</span>
             </div>
           )}
+          {digest.ownerInterventionNote && (
+            <div className="mt-2 pt-2 border-t border-white/10 text-xs sm:text-[11px] font-medium text-amber-200 flex items-start gap-1.5">
+              <Building2 className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+              <span>
+                <strong className="text-amber-400 uppercase tracking-wider text-[10px] mr-1.5">Owner Directive:</strong>
+                {digest.ownerInterventionNote}
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Two-Column: The Sunday Press Headlines & Dressing Room Pulse */}
@@ -307,6 +316,28 @@ export const WeeklyDigestModal: React.FC<WeeklyDigestModalProps> = ({
               <p className="text-xs text-slate-300 leading-relaxed mb-3">
                 {digest.dressingRoomSnippet}
               </p>
+
+              {digest.delegationNote && (
+                <div className="mb-3 bg-slate-950/70 border border-white/10 rounded-lg px-2.5 py-2 text-xs">
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                      Touchline Delegation Impact
+                    </span>
+                    {digest.delegationTrustDelta !== undefined && digest.delegationTrustDelta !== 0 && (
+                      <span
+                        className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${
+                          digest.delegationTrustDelta > 0
+                            ? 'bg-emerald-500/15 text-emerald-400'
+                            : 'bg-rose-500/15 text-rose-400'
+                        }`}
+                      >
+                        {digest.delegationTrustDelta > 0 ? `+${digest.delegationTrustDelta}` : digest.delegationTrustDelta} Coach Trust
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-snug">{digest.delegationNote}</p>
+                </div>
+              )}
             </div>
 
             <div className="border-t border-white/10 pt-2.5 flex flex-wrap items-center justify-between gap-2 text-xs font-mono">

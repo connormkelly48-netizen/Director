@@ -13,6 +13,7 @@ interface SackedModalProps {
   club: Club;
   owner: Owner;
   director: Director;
+  sackReason?: string;
   onEnterJobMarket: () => void;
   onBackToMainMenu?: () => void;
 }
@@ -21,6 +22,7 @@ export const SackedModal: React.FC<SackedModalProps> = ({
   club,
   owner,
   director,
+  sackReason,
   onEnterJobMarket,
   onBackToMainMenu,
 }) => {
@@ -78,6 +80,15 @@ export const SackedModal: React.FC<SackedModalProps> = ({
             Relieved of Directorship
           </h2>
         </div>
+
+        {sackReason && (
+          <div className="bg-rose-950/40 border border-rose-500/30 rounded-xl p-3 text-left text-xs text-rose-200 max-w-[75ch] mx-auto">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-rose-400 block mb-1">
+              Boardroom Dismissal Trigger
+            </span>
+            <p className="leading-snug">{sackReason}</p>
+          </div>
+        )}
 
         <div className="bg-slate-900/90 border border-white/5 rounded-xl p-4 text-xs text-slate-300 leading-relaxed font-serif italic text-left max-w-[75ch] mx-auto">
           "Dear {director.name},<br/><br/>

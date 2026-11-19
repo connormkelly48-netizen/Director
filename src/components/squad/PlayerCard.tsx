@@ -87,7 +87,6 @@ function getFitRingClass(fitLevel?: SlotFitLevel): string {
       return 'ring-2 ring-amber-400';
     case 'bad':
       return 'ring-2 ring-rose-500';
-    case 'good':
     default:
       return '';
   }

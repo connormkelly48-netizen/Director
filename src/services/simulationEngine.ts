@@ -3,15 +3,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Club, Director, FormationId, Lineup, Manager, MatchResult, Owner, Player, WeeklyDigest, PressHeadline, BoardroomMemo, DelegationMatrix, JobVacancy, SeasonSummary, SeasonAward, LeagueTier, AcademyPlayer, ProspectTrait, PlayerPosition, GrowthMomentum, MomentumTier, MoraleLevel, GameweekRecord, GameweekStandingsEntry, TransferRecord, TransferProposal, IncomingBid, ManagerSigningEvent, AcademyWireEvent, RetirementRecord, SeasonGraduateHighlight } from '../types/game';
+import { Club, ClubDirector, Director, DirectorGradeFactor, FormationId, GameMode, Lineup, Manager, MatchResult, Owner, Player, WeeklyDigest, PressHeadline, BoardroomMemo, DelegationMatrix, JobVacancy, SeasonSummary, SeasonAward, LeagueTier, AcademyPlayer, ProspectTrait, PlayerPosition, GrowthMomentum, MomentumTier, MoraleLevel, GameweekRecord, GameweekStandingsEntry, TransferRecord, TransferProposal, IncomingBid, ManagerSigningEvent, AcademyWireEvent, RetirementRecord, SeasonGraduateHighlight } from '../types/game';
 import { TAKEOVER_CANDIDATES } from '../data/database';
 import {
+  YOUTH_ACADEMY_CONFIG,
+  getAcademyRatingRangeForReputation,
+} from '../config/youthAcademyConfig';
+import {
+  evaluatePlayerStyleFit,
+  GeneratedTransferOffer,
+  getTransferOffers,
+  isTransferWindowOpen,
   parseFormation,
   selectStartingXI,
   expireTransferProposals,
   runManagerTransferActivity,
   runManagerContractRenewals,
 } from './transferService';
+import { computeTransferROI } from '../utils/transferRoi';
 import {
   autoPickLineup,
   computeTeamRating,
@@ -23,8 +32,26 @@ import {
   syncLineupAfterSquadChange,
 } from '../utils/lineup';
 import { FORMATIONS } from '../data/formations';
+import {
+  appendManagerHistory,
+  applyManagerReputationChange,
+  deriveManagerAttributes,
+  getManagerCareerStats,
+  recordManagerMatchResult,
+  selectBestAffordableManagerForAIClub,
+} from './managerService';
+import {
+  runAISportingDirectorWeeklyActivity,
+  runManagerModeSeasonEndRenewals,
+} from './managerModeService';
 
 export { parseFormation, selectStartingXI };
+
+export interface SimulationModeOptions {
+  gameMode?: GameMode;
+  userManagerAdapter?: Manager;
+  clubDirector?: ClubDirector;
+}
 
 // Helper to construct a validated TransferRecord
 export function createTransferRecord(
@@ -77,13 +104,14 @@ export function deriveMorale(happiness: number): MoraleLevel {
   return 'furious';
 }
 
-// Calculate team rating from starting XI taking into account getSlotFit penalties and +0.5% formation comfort
+// Calculate team rating from starting XI taking into account getSlotFit penalties, tactical style fit, and +0.5% formation comfort
 export function getTeamMatchRating(club: Club, manager?: Manager, cachedLineup?: Lineup): number {
   const lineup = cachedLineup ?? resolveClubLineup(club, manager);
   const def = FORMATIONS[lineup.formation] || FORMATIONS['4-3-3'];
   const healthyById = new Map(club.squad.filter(p => !p.isInjured).map(p => [p.id, p]));
   const seen = new Set<string>();
   let totalOvr = 0;
+  let totalStyleBonus = 0;
   let starterCount = 0;
 
   for (let i = 0; i < def.slots.length; i++) {
@@ -92,6 +120,9 @@ export function getTeamMatchRating(club: Club, manager?: Manager, cachedLineup?:
     const player = healthyById.get(pid);
     if (!player) continue;
     totalOvr += getSlotFit(player, def.slots[i].role).effectiveOverall;
+    if (manager) {
+      totalStyleBonus += evaluatePlayerStyleFit(manager, player).matchBonus;
+    }
     seen.add(pid);
     starterCount += 1;
   }
@@ -99,10 +130,15 @@ export function getTeamMatchRating(club: Club, manager?: Manager, cachedLineup?:
   if (starterCount === 0) return 60;
 
   const avgOvr = totalOvr / starterCount;
+  const avgStyleBonus = totalStyleBonus / starterCount;
   const mgrBonus = manager ? (manager.reputation / 100) * 4 : 0;
   const trustModifier = manager ? ((manager.trustInDirector - 50) / 100) * 3 : 0;
+  const mgrAttrs = manager ? (manager.attributes ?? deriveManagerAttributes(manager)) : undefined;
+  const attrModifier = mgrAttrs
+    ? (mgrAttrs.tactical - 65) * 0.025 + (mgrAttrs.manManagement - 65) * 0.015
+    : 0;
 
-  let rating = avgOvr + mgrBonus + trustModifier;
+  let rating = avgOvr + avgStyleBonus + mgrBonus + trustModifier + attrModifier;
 
   // Formation comfort: +0.5% bonus if active formation matches manager's preferred formation (leading numbers)
   const preferredNumbers = extractFormationNumber(manager?.preferredFormation);
@@ -283,6 +319,7 @@ export function simulateMatch(
   // Post-match ratings, appearances, form, happiness & morale for both squads
   const updateSquadPostMatch = (
     club: Club,
+    manager: Manager | undefined,
     starters: Player[],
     myScore: number,
     oppScore: number,
@@ -300,11 +337,17 @@ export function simulateMatch(
       const pGoals = goalsThisMatch.get(p.id) || 0;
       const pAssists = assistsThisMatch.get(p.id) || 0;
       const cleanSheetMod = ((p.position === 'GK' || p.position === 'DEF') && hasCleanSheet) ? 0.4 : 0;
+      const styleFit = evaluatePlayerStyleFit(manager, p);
+      const momentumBias =
+        p.growthMomentum === 'breakout' ? 0.25 :
+        p.growthMomentum === 'prime' ? 0.15 :
+        p.growthMomentum === 'rapid' ? 0.10 :
+        p.growthMomentum === 'cooling' ? -0.15 : 0;
       const noise = (Math.random() * 1.2) - 0.6; // +/- 0.6
 
       const matchRating = Math.min(
         10.0,
-        Math.max(4.0, Math.round((6.5 + resultMod + pGoals * 0.8 + pAssists * 0.5 + cleanSheetMod + noise) * 10) / 10)
+        Math.max(4.0, Math.round((6.5 + resultMod + pGoals * 0.8 + pAssists * 0.5 + cleanSheetMod + styleFit.formBias + momentumBias + noise) * 10) / 10)
       );
 
       // Rolling form: form = form * 0.8 + matchRating * 0.2
@@ -339,8 +382,8 @@ export function simulateMatch(
     });
   };
 
-  updateSquadPostMatch(homeClub, homeXI, homeGoals, awayGoals, awayGoals === 0);
-  updateSquadPostMatch(awayClub, awayXI, awayGoals, homeGoals, homeGoals === 0);
+  updateSquadPostMatch(homeClub, homeManager, homeXI, homeGoals, awayGoals, awayGoals === 0);
+  updateSquadPostMatch(awayClub, awayManager, awayXI, awayGoals, homeGoals, homeGoals === 0);
 
   return {
     homeClubId: homeClub.id,
@@ -483,15 +526,40 @@ export function processSquadProgression(
   return { growthCount, declineCount };
 }
 
-// Generate the Sunday Press headlines based on match and boardroom climate
+export interface PressHeadlineContext {
+  recentTransfers?: TransferRecord[];
+  ownerInterventionNote?: string;
+}
+
+function countLeadingFormStreak(form: ('W' | 'D' | 'L')[], target: 'W' | 'D' | 'L'): number {
+  let count = 0;
+  for (const r of form) {
+    if (r === target) count++;
+    else break;
+  }
+  return count;
+}
+
+// Generate the Sunday Press headlines based on real match, squad, transfer, and boardroom state
 export function generatePressHeadlines(
   director: Director,
   club: Club,
   owner: Owner,
   manager: Manager | undefined,
-  match: MatchResult | undefined
+  match: MatchResult | undefined,
+  context: PressHeadlineContext = {}
 ): PressHeadline[] {
   const headlines: PressHeadline[] = [];
+  const winStreak = countLeadingFormStreak(club.form, 'W');
+  const lossStreak = countLeadingFormStreak(club.form, 'L');
+  const unbeatenStreak = (() => {
+    let c = 0;
+    for (const r of club.form) {
+      if (r === 'L') break;
+      c++;
+    }
+    return c;
+  })();
 
   if (match) {
     const isHome = match.homeClubId === club.id;
@@ -499,32 +567,47 @@ export function generatePressHeadlines(
     const goalsAgainst = isHome ? match.awayScore : match.homeScore;
     const isWin = goalsFor > goalsAgainst;
     const isLoss = goalsFor < goalsAgainst;
+    const goalEvents = match.events.filter(e => e.type === 'goal' && e.team === (isHome ? 'home' : 'away'));
+    const heroScorer = goalEvents[0]?.player;
 
     if (isWin) {
+      const margin = goalsFor - goalsAgainst;
+      const winHeadline =
+        winStreak >= 3
+          ? `${club.name} extend winning run to ${winStreak} matches after ${goalsFor}-${goalsAgainst} victory`
+          : margin >= 3
+            ? `${club.name} dismantle rivals ${goalsFor}-${goalsAgainst}${heroScorer ? ` as ${heroScorer} stars` : ''}`
+            : heroScorer
+              ? `${heroScorer} fires ${club.name} to ${goalsFor}-${goalsAgainst} ${isHome ? 'home' : 'away'} win`
+              : `${club.name} claim sharp ${goalsFor}-${goalsAgainst} result to climb the table`;
       headlines.push({
-        title: `${club.name} produce tactical masterclass in ${goalsFor}-${goalsAgainst} thriller!`,
+        title: winHeadline,
         source: 'The Sunday Athletic',
         category: 'match',
         sentiment: 'positive',
       });
       if (director.fanApproval < 50) {
         headlines.push({
-          title: `Director ${director.name} buys crucial breathing room as terrace discontent pauses`,
+          title: `Victory eases pressure on Director ${director.name} after recent terrace unrest`,
           source: 'Sky Sports News',
           category: 'fan_reaction',
           sentiment: 'positive',
         });
       }
     } else if (isLoss) {
+      const lossHeadline =
+        lossStreak >= 3
+          ? `${club.name} slump to ${lossStreak} straight defeats after ${goalsFor}-${goalsAgainst} setback`
+          : `${club.name} undone in ${goalsFor}-${goalsAgainst} loss as board expectation (${club.fanExpectation}) comes under scrutiny`;
       headlines.push({
-        title: `CRISIS AT ${club.shortName}: Dismal ${goalsFor}-${goalsAgainst} defeat plunges club into turmoil`,
+        title: lossHeadline,
         source: 'Daily Football Mail',
         category: 'match',
         sentiment: 'negative',
       });
-      if (owner.patience === 'volatile' || owner.patience === 'impatient') {
+      if ((owner.patience === 'volatile' || owner.patience === 'impatient') && lossStreak >= 2) {
         headlines.push({
-          title: `Boardroom Summit: Owner ${owner.name} reportedly furious with recruitment strategy`,
+          title: `${owner.name} calls urgent recruitment review as ${club.shortName} slide continues`,
           source: 'The Guardian Football',
           category: 'boardroom',
           sentiment: 'negative',
@@ -532,7 +615,10 @@ export function generatePressHeadlines(
       }
     } else {
       headlines.push({
-        title: `${club.name} grind out hard-fought ${goalsFor}-${goalsAgainst} stalemate`,
+        title:
+          unbeatenStreak >= 4
+            ? `${club.name} stretch unbeaten run to ${unbeatenStreak} games with ${goalsFor}-${goalsAgainst} draw`
+            : `${club.name} share spoils in ${goalsFor}-${goalsAgainst} draw`,
         source: 'BBC Sport',
         category: 'match',
         sentiment: 'neutral',
@@ -540,10 +626,70 @@ export function generatePressHeadlines(
     }
   }
 
-  // Fan & Manager whispers
+  // Real squad state stories (unhappy players, injuries, expiring deals, new signings)
+  const injuredKey = [...club.squad]
+    .filter(p => p.isInjured)
+    .sort((a, b) => b.overall - a.overall)[0];
+  if (injuredKey) {
+    headlines.push({
+      title: `Injury blow at ${club.shortName}: ${injuredKey.name} (${injuredKey.overall} OVR) sidelined for ${injuredKey.injuryWeeks || 1} more week${(injuredKey.injuryWeeks || 1) === 1 ? '' : 's'}`,
+      source: 'Club Medical Bulletin',
+      category: 'crisis',
+      sentiment: 'negative',
+    });
+  }
+
+  const unhappyStar = [...club.squad]
+    .filter(p => p.happiness < 45)
+    .sort((a, b) => a.happiness - b.happiness)[0];
+  if (unhappyStar) {
+    headlines.push({
+      title: `Dressing room tension: ${unhappyStar.name} (${unhappyStar.happiness}% morale) grows frustrated over role`,
+      source: 'Training Ground Insider',
+      category: 'crisis',
+      sentiment: 'negative',
+    });
+  }
+
+  const expiringCore = [...club.squad]
+    .filter(p => !p.retiringAtSeasonEnd && p.contractYears <= 1 && p.overall >= 70)
+    .sort((a, b) => b.overall - a.overall)[0];
+  if (expiringCore && headlines.length < 4) {
+    headlines.push({
+      title: `Contract watch: ${expiringCore.name} enters final year at ${club.shortName} with clubs monitoring`,
+      source: 'Transfer Notebook',
+      category: 'transfer',
+      sentiment: 'neutral',
+    });
+  }
+
+  const recentSigning = (context.recentTransfers || []).find(
+    tr => tr.type === 'signing' && tr.toClubId === club.id
+  );
+  if (recentSigning && headlines.length < 4) {
+    const liveSigned = club.squad.find(p => p.id === recentSigning.playerId);
+    if (liveSigned) {
+      headlines.push({
+        title: `New arrival ${liveSigned.name} (${liveSigned.roleDetail}) settles into ${club.shortName} plans`,
+        source: 'Sky Sports Wire',
+        category: 'transfer',
+        sentiment: liveSigned.form >= 6.8 ? 'positive' : 'neutral',
+      });
+    }
+  }
+
+  if (context.ownerInterventionNote) {
+    headlines.push({
+      title: context.ownerInterventionNote,
+      source: 'The Boardroom Wire',
+      category: 'boardroom',
+      sentiment: owner.approval < 50 ? 'negative' : 'neutral',
+    });
+  }
+
   if (manager && manager.trustInDirector < 40) {
     headlines.push({
-      title: `Rift brewing between Manager ${manager.name} and Sporting Director over squad control`,
+      title: `Rift widens between Head Coach ${manager.name} and Sporting Director ${director.name} (Trust ${manager.trustInDirector}%)`,
       source: 'Fabrizio Romano Wire',
       category: 'crisis',
       sentiment: 'negative',
@@ -559,58 +705,334 @@ export function generatePressHeadlines(
     });
   }
 
-  return headlines;
+  return headlines.slice(0, 5);
 }
 
-// Generate boardroom internal memo and owner communication
+// Generate boardroom internal memo shaped by owner wealth, patience, involvement, and recruitment philosophy
 export function generateBoardroomMemo(
   director: Director,
   club: Club,
   owner: Owner,
   manager: Manager | undefined,
-  match: MatchResult | undefined
+  _match: MatchResult | undefined,
+  ownerInterventionNote?: string
 ): BoardroomMemo {
-  // Check winning / losing streaks
-  const recentForm = club.form.slice(0, 3);
-  const winCount = recentForm.filter(f => f === 'W').length;
-  const lossCount = recentForm.filter(f => f === 'L').length;
+  const winStreak = countLeadingFormStreak(club.form, 'W');
+  const lossStreak = countLeadingFormStreak(club.form, 'L');
+  const targetNote =
+    owner.demandedTargets && owner.demandedTargets.length > 0
+      ? ` Active mandate: ${owner.demandedTargets[0]}.`
+      : '';
+  const philosophyLabel = owner.recruitmentPhilosophy.replace(/_/g, ' ');
 
-  if (lossCount >= 3) {
-    if (owner.approval < 40) {
+  if (lossStreak >= 3 || (owner.patience === 'volatile' && lossStreak >= 2)) {
+    if (owner.approval < 42 || director.boardTrust <= 28) {
       return {
         author: owner.name,
-        role: 'Club Chairman / Majority Owner',
-        content: `Three defeats on the spin is completely unacceptable for a club of our stature. The fans are screaming for accountability. If we do not see an immediate resurgence in our next match, I will have no hesitation in restructuring our entire football leadership. Consider this an official final notice.`,
+        role: `Chairman · ${owner.involvement.replace('_', ' ')} (${owner.patience})`,
+        content:
+          owner.involvement === 'micromanager'
+            ? `${lossStreak} defeats in a row will not stand. I am reviewing every line-up and ${philosophyLabel} target personally. Turn this around next matchday or I will restructure leadership immediately.${targetNote}`
+            : `Our run of ${lossStreak} straight defeats has exhausted board patience. Without an immediate response on the pitch, your position as Sporting Director is untenable.`,
         tone: 'ultimatum',
-        impactExplanation: 'Board trust has dropped to critical levels. A defeat in the next round could lead to your immediate dismissal!',
-      };
-    } else {
-      return {
-        author: owner.name,
-        role: 'Club Chairman / Majority Owner',
-        content: `Our recent sequence of results is causing significant alarm in the boardroom. I have backed your transfer vision with substantial capital; now we need to see return on that investment on the pitch. Keep the manager focused.`,
-        tone: 'warning',
-        impactExplanation: 'Owner patience is wearing thin. Maintain close dialogue with your head coach.',
+        impactExplanation: ownerInterventionNote || 'Board trust is critically low; another defeat risks immediate dismissal.',
       };
     }
-  }
-
-  if (winCount >= 3) {
     return {
       author: owner.name,
-      role: 'Club Chairman / Majority Owner',
-      content: `Superb run of performances! The squad looks cohesive, our market decisions are vindicated, and morale around the training ground is tremendous. Keep pushing toward our seasonal targets.`,
-      tone: 'praising',
-      impactExplanation: 'Board trust and fan approval have surged by +5 points!',
+      role: `Chairman · ${owner.wealth} ownership`,
+      content: `This sequence of ${lossStreak} defeats falls below our ${club.fanExpectation} standard. Align recruitment strictly with our ${philosophyLabel} direction and steady the dugout with ${manager?.name || 'the coaching staff'}.${targetNote}`,
+      tone: 'warning',
+      impactExplanation: ownerInterventionNote || `Owner patience (${owner.patience}) is tightening.`,
     };
   }
 
+  if (winStreak >= 3) {
+    return {
+      author: owner.name,
+      role: `Chairman · ${owner.wealth} ownership`,
+      content:
+        owner.involvement === 'hands_off'
+          ? `Three wins on the bounce proves our hands-off governance works. Keep delivering results and sticking to our ${philosophyLabel} vision.${targetNote}`
+          : `Superb ${winStreak}-match winning surge! Squad cohesion and our ${philosophyLabel} direction are paying off on the pitch.${targetNote}`,
+      tone: 'praising',
+      impactExplanation: ownerInterventionNote || 'Board trust and fan approval surged by +5 points!',
+    };
+  }
+
+  const expiringCount = club.squad.filter(p => !p.retiringAtSeasonEnd && p.contractYears <= 1).length;
+  const budgetNote =
+    owner.wealth === 'frugal'
+      ? `Keep weekly wages inside £${(club.wageBudget / 1000).toFixed(0)}k and protect cash reserves (£${(club.balance / 1000000).toFixed(1)}M).`
+      : `Continue building toward ${club.fanExpectation} within our ${philosophyLabel} remit.`;
+
   return {
     author: owner.name,
-    role: 'Club Chairman / Majority Owner',
-    content: `Weekly executive review completed. Squad balance looks adequate. Keep monitoring wage commitments and ensure our medical staff manages player fitness properly.`,
+    role: `Chairman · ${owner.involvement.replace('_', ' ')}`,
+    content:
+      owner.involvement === 'hands_off'
+        ? `Brief check-in: we trust your day-to-day handling of ${club.name}. ${expiringCount > 0 ? `${expiringCount} contract(s) need attention before summer. ` : ''}${budgetNote}`
+        : `Weekly executive review: ${expiringCount > 0 ? `${expiringCount} senior contract(s) enter their final year. ` : ''}${budgetNote}${targetNote}`,
     tone: 'neutral',
+    impactExplanation: ownerInterventionNote,
   };
+}
+
+export function evaluateOwnerSackDecision(
+  director: Director,
+  club: Club | undefined,
+  owner: Owner | undefined
+): { sacked: boolean; reason?: string } {
+  if (!owner || !club) {
+    if (director.boardTrust <= 0) {
+      return {
+        sacked: true,
+        reason: 'Board trust reached 0% after sustained underperformance.',
+      };
+    }
+    return { sacked: false };
+  }
+
+  const recentLosses = club.form.slice(0, 5).filter(r => r === 'L').length;
+  const nearBottom = club.played >= 14 && (club.points / Math.max(1, club.played)) < 0.85;
+
+  switch (owner.patience) {
+    case 'volatile':
+      if (director.boardTrust <= 15) {
+        return {
+          sacked: true,
+          reason: `Volatile owner ${owner.name} pulled the trigger once board trust dropped to ${director.boardTrust}% (volatile threshold: <=15%).`,
+        };
+      }
+      if (director.boardTrust <= 28 && club.played >= 10 && recentLosses >= 4) {
+        return {
+          sacked: true,
+          reason: `Volatile owner ${owner.name} dismissed you after ${recentLosses} defeats in 5 matches with trust at ${director.boardTrust}%.`,
+        };
+      }
+      return { sacked: false };
+
+    case 'impatient':
+      if (director.boardTrust <= 8) {
+        return {
+          sacked: true,
+          reason: `Impatient owner ${owner.name} terminated your contract with board trust at ${director.boardTrust}% (impatient threshold: <=8%).`,
+        };
+      }
+      if (director.boardTrust <= 18 && nearBottom) {
+        return {
+          sacked: true,
+          reason: `Impatient owner ${owner.name} acted over relegation form (${club.points} pts in ${club.played} games) and ${director.boardTrust}% trust.`,
+        };
+      }
+      return { sacked: false };
+
+    case 'patient':
+      if (director.boardTrust <= 0 && (owner.approval <= 15 || club.played >= 14)) {
+        return {
+          sacked: true,
+          reason: `Patient owner ${owner.name} finally ended your tenure after board trust hit 0% and approval sank to ${owner.approval}%.`,
+        };
+      }
+      return { sacked: false };
+
+    case 'balanced':
+    default:
+      if (director.boardTrust <= 0) {
+        return {
+          sacked: true,
+          reason: `Owner ${owner.name} dismissed you after board trust fell to 0%.`,
+        };
+      }
+      return { sacked: false };
+  }
+}
+
+export function evaluateWeeklyDelegationEffects(
+  club: Club,
+  manager: Manager | undefined,
+  delegation: DelegationMatrix
+): {
+  trustDelta: number;
+  moraleDelta: number;
+  consequenceNote?: string;
+} {
+  if (!manager) return { trustDelta: 0, moraleDelta: 0 };
+
+  const delegatedTransferCount =
+    (delegation.transferSignings !== 'director' ? 1 : 0) +
+    (delegation.transferSales !== 'director' ? 1 : 0) +
+    (delegation.contractRenewals === 'manager' ? 1 : 0) +
+    (delegation.youthPromotion === 'manager' ? 1 : 0);
+
+  if (manager.controlDesire === 'head_coach') {
+    if (delegation.tacticalStyle === 'manager_freedom' && delegatedTransferCount >= 2) {
+      const trustDelta = delegatedTransferCount >= 4 ? 2 : 1;
+      const moraleDelta = manager.trustInDirector >= 70 ? 2 : 1;
+      return {
+        trustDelta,
+        moraleDelta,
+        consequenceNote: `Giving Head Coach ${manager.name} tactical & squad autonomy boosted manager trust (+${trustDelta}) and dressing-room morale (+${moraleDelta}%).`,
+      };
+    }
+    if (delegation.tacticalStyle === 'director_mandated' && delegatedTransferCount === 0) {
+      return {
+        trustDelta: -1,
+        moraleDelta: -1,
+        consequenceNote: `Tight director micromanagement dampened ${manager.name}'s dressing-room momentum (-1 trust, -1% morale).`,
+      };
+    }
+    return { trustDelta: 0, moraleDelta: 0 };
+  }
+
+  if (manager.controlDesire === 'autocrat') {
+    const fullyOverridden =
+      delegation.tacticalStyle === 'director_mandated' ||
+      (delegation.transferSignings === 'director' && delegation.transferSales === 'director');
+
+    if (fullyOverridden) {
+      const trustDelta =
+        delegation.tacticalStyle === 'director_mandated' &&
+        delegation.transferSignings === 'director' &&
+        delegation.transferSales === 'director'
+          ? -3
+          : -2;
+      const moraleDelta = manager.trustInDirector < 45 ? -1 : 0;
+      return {
+        trustDelta,
+        moraleDelta,
+        consequenceNote: `Autocrat ${manager.name} resents losing boardroom control (${trustDelta} trust${moraleDelta < 0 ? ', -1% morale' : ''}).`,
+      };
+    }
+
+    if (delegation.tacticalStyle === 'manager_freedom' && delegatedTransferCount >= 2) {
+      return {
+        trustDelta: 1,
+        moraleDelta: 1,
+        consequenceNote: `${manager.name} thrives with full authority over tactics and transfers (+1 trust, +1% morale).`,
+      };
+    }
+    return { trustDelta: 0, moraleDelta: 0 };
+  }
+
+  // Collaborator
+  const sharedCount =
+    (delegation.transferSignings === 'shared' ? 1 : 0) +
+    (delegation.transferSales === 'shared' ? 1 : 0);
+  if (sharedCount >= 1 && delegation.tacticalStyle === 'manager_freedom') {
+    return {
+      trustDelta: 1,
+      moraleDelta: 0,
+      consequenceNote: `Shared collaboration with ${manager.name} strengthened working alignment (+1 trust).`,
+    };
+  }
+  if (delegation.tacticalStyle === 'director_mandated' && delegatedTransferCount === 0) {
+    return {
+      trustDelta: -1,
+      moraleDelta: 0,
+      consequenceNote: `Total director control irritated collaborator ${manager.name} (-1 trust).`,
+    };
+  }
+  return { trustDelta: 0, moraleDelta: 0 };
+}
+
+function evaluateWeeklyOwnerIntervention(
+  week: number,
+  club: Club,
+  owner: Owner,
+  director: Director
+): {
+  updatedClub: Club;
+  updatedOwner: Owner;
+  updatedDirector: Director;
+  interventionNote?: string;
+} {
+  const lossStreak = countLeadingFormStreak(club.form, 'L');
+  const triggerChance =
+    owner.involvement === 'micromanager'
+      ? lossStreak >= 2 ? 0.55 : 0.30
+      : owner.involvement === 'collaborative'
+        ? lossStreak >= 2 ? 0.28 : 0.14
+        : 0.05;
+
+  if (week < 2 || Math.random() >= triggerChance) {
+    return { updatedClub: club, updatedOwner: owner, updatedDirector: director };
+  }
+
+  const nextClub = { ...club };
+  const nextOwner: Owner = {
+    ...owner,
+    demandedTargets: owner.demandedTargets ? [...owner.demandedTargets] : [],
+  };
+  const nextDirector = { ...director };
+
+  // Wealthy/Oligarch emergency capital injection when struggling & short on transfer funds
+  if (
+    (owner.wealth === 'oligarch' || owner.wealth === 'wealthy') &&
+    club.transferBudget < (club.tier === 1 ? 8_000_000 : club.tier === 2 ? 2_500_000 : 800_000) &&
+    isTransferWindowOpen(week) &&
+    club.played >= 2
+  ) {
+    const boost = owner.wealth === 'oligarch'
+      ? club.tier === 1 ? 10_000_000 : club.tier === 2 ? 4_000_000 : 1_500_000
+      : club.tier === 1 ? 5_000_000 : club.tier === 2 ? 2_000_000 : 750_000;
+    nextClub.transferBudget += boost;
+    nextClub.balance += boost;
+    return {
+      updatedClub: nextClub,
+      updatedOwner: nextOwner,
+      updatedDirector: nextDirector,
+      interventionNote: `Owner ${owner.name} injected £${(boost / 1_000_000).toFixed(1)}M into the transfer war chest to accelerate our ${owner.recruitmentPhilosophy.replace(/_/g, ' ')} push.`,
+    };
+  }
+
+  // Frugal owner austerity check after losses + heavy spending
+  if (owner.wealth === 'frugal' && lossStreak >= 2 && director.netSpend > 0 && nextClub.transferBudget > 500_000) {
+    const trim = Math.round(nextClub.transferBudget * 0.15);
+    nextClub.transferBudget = Math.max(0, nextClub.transferBudget - trim);
+    nextOwner.approval = Math.max(0, nextOwner.approval - 2);
+    return {
+      updatedClub: nextClub,
+      updatedOwner: nextOwner,
+      updatedDirector: nextDirector,
+      interventionNote: `Frugal owner ${owner.name} trimmed the transfer budget by £${(trim / 1_000_000).toFixed(1)}M after ${lossStreak} defeats and net spending.`,
+    };
+  }
+
+  // Philosophy-driven board directive added to demandedTargets
+  const philosophyDirective =
+    owner.recruitmentPhilosophy === 'youth_development'
+      ? 'Promote or sign an U21 first-team contributor'
+      : owner.recruitmentPhilosophy === 'marquee_stars'
+        ? `Target a ${club.tier === 1 ? '81+' : club.tier === 2 ? '74+' : '66+'} OVR statement signing`
+        : owner.recruitmentPhilosophy === 'moneyball_data'
+          ? 'Keep all acquisitions at or below market valuation'
+          : owner.recruitmentPhilosophy === 'domestic_grit'
+            ? 'Maintain a 50%+ UK & Irish squad core'
+            : `Deliver top-tier results aligned with ${club.fanExpectation}`;
+
+  if (!nextOwner.demandedTargets!.includes(philosophyDirective)) {
+    nextOwner.demandedTargets = [philosophyDirective, ...nextOwner.demandedTargets!].slice(0, 3);
+    return {
+      updatedClub: nextClub,
+      updatedOwner: nextOwner,
+      updatedDirector: nextDirector,
+      interventionNote: `${owner.name} issued a boardroom directive: "${philosophyDirective}".`,
+    };
+  }
+
+  if (owner.involvement === 'micromanager' && lossStreak >= 2) {
+    nextDirector.boardTrust = Math.max(0, nextDirector.boardTrust - 2);
+    nextOwner.approval = Math.max(0, nextOwner.approval - 2);
+    return {
+      updatedClub: nextClub,
+      updatedOwner: nextOwner,
+      updatedDirector: nextDirector,
+      interventionNote: `Micromanager ${owner.name} docked 2 board trust over recent defeats and demanded tactical accountability.`,
+    };
+  }
+
+  return { updatedClub: club, updatedOwner: owner, updatedDirector: director };
 }
 
 // Simulate realistic AI-to-AI transfers during active transfer windows (Summer: w1-6, Winter: w20-24)
@@ -621,8 +1043,7 @@ export function simulateAITransfersForWeek(
   directorClubId: string | null
 ): TransferRecord[] {
   const newTransfers: TransferRecord[] = [];
-  const isWindowOpen = currentWeek <= 6 || (currentWeek >= 20 && currentWeek <= 24);
-  if (!isWindowOpen) return newTransfers;
+  if (!isTransferWindowOpen(currentWeek)) return newTransfers;
 
   // Decide how many AI deals to attempt this week (1 to 2 deals during open windows)
   const dealsToAttempt = Math.floor(Math.random() * 2) + 1;
@@ -642,15 +1063,26 @@ export function simulateAITransfersForWeek(
     if (eligibleSellers.length === 0) continue;
     const seller = eligibleSellers[Math.floor(Math.random() * eligibleSellers.length)];
 
+    const buyerCurrentWages = buyer.squad.reduce((sum, p) => sum + p.wage, 0);
     const eligiblePlayers = seller.squad.filter(
-      p => p.value <= buyer.transferBudget && p.value >= 400000 && !p.isInjured
+      p =>
+        p.value <= buyer.transferBudget &&
+        p.value >= 400000 &&
+        !p.isInjured &&
+        !p.retiringAtSeasonEnd &&
+        buyerCurrentWages + Math.round(p.wage * 1.15) <= buyer.wageBudget
     );
     if (eligiblePlayers.length === 0) continue;
 
     const targetPlayer = eligiblePlayers[Math.floor(Math.random() * eligiblePlayers.length)];
     const fee = Math.round(targetPlayer.value * (0.95 + Math.random() * 0.25));
+    const offeredWage = Math.round(targetPlayer.wage * 1.15);
 
-    if (buyer.transferBudget >= fee && buyer.balance >= fee) {
+    if (
+      buyer.transferBudget >= fee &&
+      buyer.balance >= fee &&
+      buyerCurrentWages + offeredWage <= buyer.wageBudget
+    ) {
       buyer.transferBudget -= fee;
       buyer.balance -= fee;
       seller.transferBudget += fee;
@@ -688,53 +1120,7 @@ export function simulateAITransfersForWeek(
     }
   }
 
-  // Occasional AI-to-AI youth academy poach during open transfer windows
-  if (Math.random() < 0.22 && aiClubs.length >= 2) {
-    const poacher = aiClubs[Math.floor(Math.random() * aiClubs.length)];
-    const poachTargets = Array.from(clubsMap.values()).filter(
-      c =>
-        c.id !== poacher.id &&
-        c.id !== directorClubId &&
-        (c.academy?.length || 0) > 2
-    );
-    if (poacher && poacher.squad.length < 24 && poachTargets.length > 0) {
-      const seller = poachTargets[Math.floor(Math.random() * poachTargets.length)];
-      const candidates = (seller.academy || []).filter(
-        a => a.age >= 17 && (a.momentumTier === 'Generational Prodigy' || a.momentumTier === 'High Tempo' || a.overall >= 58)
-      );
-      if (candidates.length > 0) {
-        const prospect = candidates[Math.floor(Math.random() * candidates.length)];
-        const fee = calculatePoachCompensation(prospect, seller);
-        const wage = getAcademyPromotionWage(poacher.tier);
-        const currentWages = poacher.squad.reduce((sum, p) => sum + p.wage, 0);
-        if (poacher.transferBudget >= fee && poacher.balance >= fee && currentWages + wage <= poacher.wageBudget) {
-          poacher.transferBudget -= fee;
-          poacher.balance -= fee;
-          seller.transferBudget += fee;
-          seller.balance += fee;
-          seller.academy = (seller.academy || []).filter(a => a.id !== prospect.id);
-
-          const poachedPlayer = buildPromotedPlayerFromProspect(prospect, poacher, wage, 4);
-          poacher.squad.push(poachedPlayer);
-
-          newTransfers.push(
-            createTransferRecord(
-              poachedPlayer,
-              'signing',
-              seller.id,
-              poacher.id,
-              fee,
-              seasonYear,
-              currentWeek,
-              'ai',
-              `Poached from ${seller.name} Youth Academy`
-            )
-          );
-        }
-      }
-    }
-  }
-
+  // AI clubs do not poach from each other's academies in this version.
   return newTransfers;
 }
 
@@ -790,7 +1176,8 @@ export function advanceSimulationWeek(
   delegation: DelegationMatrix,
   freeAgents: Player[] = [],
   transferHistory: TransferRecord[] = [],
-  transferProposals: TransferProposal[] = []
+  transferProposals: TransferProposal[] = [],
+  modeOptions?: SimulationModeOptions
 ): {
   updatedClubs: Club[];
   updatedOwners: Owner[];
@@ -824,10 +1211,90 @@ export function advanceSimulationWeek(
   }));
 
   const ownersMap = new Map<string, Owner>();
-  owners.forEach(o => ownersMap.set(o.id, { ...o }));
+  owners.forEach(o => ownersMap.set(o.id, {
+    ...o,
+    demandedTargets: o.demandedTargets ? [...o.demandedTargets] : undefined,
+  }));
 
   const managersMap = new Map<string, Manager>();
-  managers.forEach(m => managersMap.set(m.id, { ...m }));
+  managers.forEach(m =>
+    managersMap.set(m.id, {
+      ...m,
+      attributes: m.attributes ? { ...m.attributes } : deriveManagerAttributes(m),
+    })
+  );
+
+  // AI clubs that lost their manager hire a replacement from the fixed pool within 1–4 weeks
+  const aiManagerAppointmentHeadlines: PressHeadline[] = [];
+  clubsMap.forEach(c => {
+    if (c.id === director.currentClubId || c.managerId) {
+      if (c.managerId && c.managerVacancyWeeksRemaining !== undefined) {
+        c.managerVacancyWeeksRemaining = undefined;
+      }
+      return;
+    }
+
+    const currentCountdown =
+      typeof c.managerVacancyWeeksRemaining === 'number'
+        ? c.managerVacancyWeeksRemaining
+        : 1 + Math.floor(Math.random() * 4);
+    const nextCountdown = currentCountdown - 1;
+
+    if (nextCountdown > 0) {
+      c.managerVacancyWeeksRemaining = nextCountdown;
+      return;
+    }
+
+    const hirePick = selectBestAffordableManagerForAIClub(
+      c,
+      Array.from(managersMap.values()),
+      director.currentClubId
+    );
+    if (!hirePick) {
+      c.managerVacancyWeeksRemaining = 1;
+      return;
+    }
+
+    const prevEmployerId = hirePick.manager.clubId;
+    if (prevEmployerId && prevEmployerId !== c.id) {
+      const prevClub = clubsMap.get(prevEmployerId);
+      if (prevClub) {
+        prevClub.managerId = null;
+        prevClub.managerVacancyWeeksRemaining = 1 + Math.floor(Math.random() * 4);
+      }
+    }
+
+    c.managerId = hirePick.manager.id;
+    c.balance = Math.max(0, c.balance - hirePick.costs.totalCost);
+    c.managerVacancyWeeksRemaining = undefined;
+
+    const hiredAiMgr = appendManagerHistory(
+      {
+        ...hirePick.manager,
+        clubId: c.id,
+        seasonsAtClub: 0,
+        trustInDirector: 75,
+        careerStats: getManagerCareerStats(hirePick.manager),
+      },
+      {
+        season: seasonYear,
+        week: currentWeek,
+        type: 'appointed',
+        title: `Appointed Head Coach of ${c.name}`,
+        detail: `Hired by ${c.name} following a managerial vacancy.`,
+        clubId: c.id,
+        clubName: c.name,
+      }
+    );
+    managersMap.set(hirePick.manager.id, hiredAiMgr);
+
+    aiManagerAppointmentHeadlines.push({
+      title: `${c.name} appoint ${hirePick.manager.name} as new Head Coach`,
+      source: 'League Wire',
+      category: 'boardroom',
+      sentiment: 'neutral',
+    });
+  });
 
   // Per-week lineup cache:
   // - User's club runs prepareUserLineupForMatch (updates auto lineup for form/injuries or replaces injured manual starters with notice)
@@ -837,9 +1304,15 @@ export function advanceSimulationWeek(
   let matchTeamRating: number | undefined;
   let lineupNotices: string[] = [];
 
+  const isManagerMode = modeOptions?.gameMode === 'manager';
+  const userManagerAdapter = modeOptions?.userManagerAdapter;
+
   clubsMap.forEach(c => {
-    const mgr = c.managerId ? managersMap.get(c.managerId) : undefined;
-    if (director.currentClubId && c.id === director.currentClubId) {
+    const isMyClub = Boolean(director.currentClubId && c.id === director.currentClubId);
+    const mgr = isMyClub && isManagerMode && userManagerAdapter
+      ? userManagerAdapter
+      : (c.managerId ? managersMap.get(c.managerId) : undefined);
+    if (isMyClub) {
       const prepared = prepareUserLineupForMatch(c, mgr);
       c.lineup = prepared.lineup;
       lineupNotices = prepared.notices;
@@ -865,12 +1338,29 @@ export function advanceSimulationWeek(
     pairings.forEach(({ homeId, awayId }) => {
       const homeClub = clubsMap.get(homeId)!;
       const awayClub = clubsMap.get(awayId)!;
-      const homeMgr = homeClub.managerId ? managersMap.get(homeClub.managerId) : undefined;
-      const awayMgr = awayClub.managerId ? managersMap.get(awayClub.managerId) : undefined;
+      const homeMgr =
+        isManagerMode && userManagerAdapter && homeClub.id === director.currentClubId
+          ? userManagerAdapter
+          : (homeClub.managerId ? managersMap.get(homeClub.managerId) : undefined);
+      const awayMgr =
+        isManagerMode && userManagerAdapter && awayClub.id === director.currentClubId
+          ? userManagerAdapter
+          : (awayClub.managerId ? managersMap.get(awayClub.managerId) : undefined);
 
       const res = simulateMatch(homeClub, awayClub, homeMgr, awayMgr, weeklyLineupCache, newlyInjuredIds);
       applyMatchToClubs(res, homeClub, awayClub);
       allResults.push(res);
+
+      const homeOutcome: 'W' | 'D' | 'L' =
+        res.homeScore > res.awayScore ? 'W' : res.homeScore < res.awayScore ? 'L' : 'D';
+      const awayOutcome: 'W' | 'D' | 'L' =
+        res.awayScore > res.homeScore ? 'W' : res.awayScore < res.homeScore ? 'L' : 'D';
+      if (homeMgr && (!userManagerAdapter || homeMgr.id !== userManagerAdapter.id)) {
+        managersMap.set(homeMgr.id, recordManagerMatchResult(homeMgr, homeOutcome, homeClub, seasonYear, currentWeek));
+      }
+      if (awayMgr && (!userManagerAdapter || awayMgr.id !== userManagerAdapter.id)) {
+        managersMap.set(awayMgr.id, recordManagerMatchResult(awayMgr, awayOutcome, awayClub, seasonYear, currentWeek));
+      }
 
       if (director.currentClubId && (homeId === director.currentClubId || awayId === director.currentClubId)) {
         playerMatch = res;
@@ -890,7 +1380,10 @@ export function advanceSimulationWeek(
   // Player's club specifics
   const playerClub = director.currentClubId ? clubsMap.get(director.currentClubId) : undefined;
   const playerOwner = playerClub ? ownersMap.get(playerClub.ownerId) : undefined;
-  const playerManager = playerClub && playerClub.managerId ? managersMap.get(playerClub.managerId) : undefined;
+  const playerManager =
+    playerClub && isManagerMode && userManagerAdapter
+      ? userManagerAdapter
+      : (playerClub && playerClub.managerId ? managersMap.get(playerClub.managerId) : undefined);
 
   let totalGrowth = 0;
   let totalDecline = 0;
@@ -933,14 +1426,14 @@ export function advanceSimulationWeek(
     }
   }
 
-  // Expire stale pending transfer proposals every week
-  let updatedTransferProposals = expireTransferProposals(transferProposals, currentWeek);
+  // Expire stale pending transfer proposals every week and whenever a transfer window shuts
+  let updatedTransferProposals = expireTransferProposals(transferProposals, nextWeek, true);
   let updatedFreeAgents = freeAgents.map(fa => ({ ...fa }));
 
   // Check for Manager-Controlled / Shared Autonomous Transfer Activity during open transfer windows (Weeks 1-6, 20-24)
   let managerSigning: ManagerSigningEvent | undefined;
   let managerPressHeadlines: PressHeadline[] = [];
-  const isWindowOpen = currentWeek <= 6 || (currentWeek >= 20 && currentWeek <= 24);
+  const isWindowOpen = isTransferWindowOpen(currentWeek);
   const newTransfers = simulateAITransfersForWeek(currentWeek, seasonYear, clubsMap, director.currentClubId);
   const newIncomingBids: IncomingBid[] = [];
   let finalDirector = updatedDirector;
@@ -953,7 +1446,7 @@ export function advanceSimulationWeek(
       ? managersMap.get(preDealPlayerClub.managerId)
       : undefined;
 
-  if (myClubId && preDealPlayerClub && preDealPlayerManager && preDealPlayerOwner) {
+  if (!isManagerMode && myClubId && preDealPlayerClub && preDealPlayerManager && preDealPlayerOwner) {
     const managerActivity = runManagerTransferActivity({
       currentWeek,
       seasonYear,
@@ -982,18 +1475,41 @@ export function advanceSimulationWeek(
       managerPressHeadlines = managerActivity.pressHeadlines;
     }
     managerSigning = managerActivity.managerSigning;
+  } else if (isManagerMode && myClubId && modeOptions?.clubDirector && userManagerAdapter) {
+    const aiDirActivity = runAISportingDirectorWeeklyActivity({
+      currentWeek,
+      seasonYear,
+      userClubId: myClubId,
+      clubDirector: modeOptions.clubDirector,
+      clubs: Array.from(clubsMap.values()),
+      freeAgents: updatedFreeAgents,
+      owners: Array.from(ownersMap.values()),
+      managerAdapter: userManagerAdapter,
+      transferHistory: [...newTransfers, ...transferHistory],
+    });
+    clubsMap.clear();
+    aiDirActivity.clubs.forEach(c => clubsMap.set(c.id, c));
+    updatedFreeAgents = aiDirActivity.freeAgents;
+    ownersMap.clear();
+    aiDirActivity.owners.forEach(o => ownersMap.set(o.id, o));
+    if (aiDirActivity.newTransfers.length > 0) {
+      newTransfers.unshift(...aiDirActivity.newTransfers);
+    }
+    if (aiDirActivity.pressHeadlines.length > 0) {
+      managerPressHeadlines.push(...aiDirActivity.pressHeadlines);
+    }
   }
 
   const academyWire: AcademyWireEvent[] = [];
 
-  // Check for Manager-Controlled Youth Academy Promotions for MY club only
+  // Check for Manager-Controlled Youth Academy Promotions for MY club only (Director Mode)
   const postTransferPlayerClub = myClubId ? clubsMap.get(myClubId) : undefined;
   const postTransferPlayerManager =
     postTransferPlayerClub && postTransferPlayerClub.managerId
       ? managersMap.get(postTransferPlayerClub.managerId)
       : undefined;
 
-  if (myClubId && postTransferPlayerClub) {
+  if (!isManagerMode && myClubId && postTransferPlayerClub) {
     const youthActivity = runManagerYouthPromotion({
       myClubId,
       club: postTransferPlayerClub,
@@ -1004,6 +1520,12 @@ export function advanceSimulationWeek(
       transferHistory: [...newTransfers, ...transferHistory],
     });
     clubsMap.set(myClubId, youthActivity.updatedClub);
+    if (youthActivity.reputationGain > 0) {
+      finalDirector = {
+        ...finalDirector,
+        reputation: Math.min(100, finalDirector.reputation + youthActivity.reputationGain),
+      };
+    }
     if (youthActivity.newTransfers.length > 0) {
       newTransfers.unshift(...youthActivity.newTransfers);
       youthActivity.newTransfers.forEach(tr => {
@@ -1024,14 +1546,14 @@ export function advanceSimulationWeek(
     }
   }
 
-  // Check for Manager-Controlled Contract Renewals for MY club only
+  // Check for Manager-Controlled Contract Renewals for MY club only (Director Mode)
   const postYouthPlayerClub = myClubId ? clubsMap.get(myClubId) : undefined;
   const postYouthPlayerManager =
     postYouthPlayerClub && postYouthPlayerClub.managerId
       ? managersMap.get(postYouthPlayerClub.managerId)
       : undefined;
 
-  if (myClubId && postYouthPlayerClub) {
+  if (!isManagerMode && myClubId && postYouthPlayerClub) {
     const renewalActivity = runManagerContractRenewals({
       myClubId,
       club: postYouthPlayerClub,
@@ -1103,17 +1625,23 @@ export function advanceSimulationWeek(
   // Re-read my club from the updated working map before doing anything else
   const latestPlayerClub = myClubId ? clubsMap.get(myClubId) : undefined;
   const latestPlayerOwner = latestPlayerClub ? ownersMap.get(latestPlayerClub.ownerId) : undefined;
-  const latestPlayerManager = latestPlayerClub && latestPlayerClub.managerId ? managersMap.get(latestPlayerClub.managerId) : undefined;
+  const latestPlayerManager =
+    latestPlayerClub && isManagerMode && userManagerAdapter
+      ? userManagerAdapter
+      : (latestPlayerClub && latestPlayerClub.managerId ? managersMap.get(latestPlayerClub.managerId) : undefined);
 
-  // Keep user's club lineup clean after match injuries, weekly recoveries, and manager autonomous transfers
+  // Keep user's club lineup clean after match injuries, weekly recoveries, and autonomous transfers
   if (latestPlayerClub?.lineup) {
     latestPlayerClub.lineup = syncLineupAfterSquadChange(latestPlayerClub, latestPlayerManager);
   }
 
-  // Check for organic incoming bids for user's club players during transfer windows
-  if (isWindowOpen && latestPlayerClub && latestPlayerClub.squad.length > 18 && Math.random() < 0.30) {
+  // Check for organic incoming bids for user's club players during transfer windows (Director Mode)
+  if (!isManagerMode && isWindowOpen && latestPlayerClub && latestPlayerClub.squad.length > 18 && Math.random() < 0.30) {
     const attractivePlayers = latestPlayerClub.squad.filter(
-      p => !p.isInjured && (p.form >= 7.0 || p.overall >= 73 || p.growthMomentum === 'breakout')
+      p =>
+        !p.isInjured &&
+        !p.retiringAtSeasonEnd &&
+        (p.form >= 7.0 || p.overall >= 73 || p.growthMomentum === 'breakout')
     );
     if (attractivePlayers.length > 0) {
       const targetPlayer = attractivePlayers[Math.floor(Math.random() * attractivePlayers.length)];
@@ -1131,18 +1659,76 @@ export function advanceSimulationWeek(
     }
   }
 
+  // Apply weekly delegation trust & squad morale effects (Director Mode)
+  let delegationNote: string | undefined;
+  let delegationTrustDelta: number | undefined;
+  if (!isManagerMode && latestPlayerClub && latestPlayerManager) {
+    const delegationOutcome = evaluateWeeklyDelegationEffects(
+      latestPlayerClub,
+      latestPlayerManager,
+      delegation
+    );
+    if (delegationOutcome.trustDelta !== 0) {
+      latestPlayerManager.trustInDirector = Math.max(
+        0,
+        Math.min(100, latestPlayerManager.trustInDirector + delegationOutcome.trustDelta)
+      );
+      delegationTrustDelta = delegationOutcome.trustDelta;
+    }
+    if (delegationOutcome.moraleDelta !== 0) {
+      latestPlayerClub.squad.forEach(p => {
+        p.happiness = Math.max(15, Math.min(100, p.happiness + delegationOutcome.moraleDelta));
+        p.morale = deriveMorale(p.happiness);
+      });
+    }
+    delegationNote = delegationOutcome.consequenceNote;
+  }
+
+  // Apply weekly owner intervention driven by involvement, wealth & philosophy
+  let ownerInterventionNote: string | undefined;
+  let activeOwner = latestPlayerOwner;
+  let activeClub = latestPlayerClub;
+  if (latestPlayerClub && latestPlayerOwner) {
+    const ownerStep = evaluateWeeklyOwnerIntervention(
+      currentWeek,
+      latestPlayerClub,
+      latestPlayerOwner,
+      finalDirector
+    );
+    activeClub = ownerStep.updatedClub;
+    activeOwner = ownerStep.updatedOwner;
+    finalDirector = ownerStep.updatedDirector;
+    clubsMap.set(activeClub.id, activeClub);
+    ownersMap.set(activeOwner.id, activeOwner);
+    ownerInterventionNote = ownerStep.interventionNote;
+  }
+
   // Create digest
-  const pressHeadlines = latestPlayerClub && latestPlayerOwner
-    ? generatePressHeadlines(finalDirector, latestPlayerClub, latestPlayerOwner, latestPlayerManager, playerMatch)
+  const recentCombinedTransfers = [...newTransfers, ...transferHistory].slice(0, 20);
+  const pressHeadlines = activeClub && activeOwner
+    ? generatePressHeadlines(finalDirector, activeClub, activeOwner, latestPlayerManager, playerMatch, {
+        recentTransfers: recentCombinedTransfers,
+        ownerInterventionNote,
+      })
     : [];
 
-  // Prepend manager transfer/board-veto headlines
+  // Prepend manager transfer/board-veto headlines & AI manager appointments
   if (managerPressHeadlines.length > 0) {
     pressHeadlines.unshift(...managerPressHeadlines);
   }
+  if (aiManagerAppointmentHeadlines.length > 0) {
+    pressHeadlines.unshift(...aiManagerAppointmentHeadlines.slice(0, 2));
+  }
 
-  const boardroomMemo = latestPlayerClub && latestPlayerOwner
-    ? generateBoardroomMemo(finalDirector, latestPlayerClub, latestPlayerOwner, latestPlayerManager, playerMatch)
+  const boardroomMemo = activeClub && activeOwner
+    ? generateBoardroomMemo(
+        finalDirector,
+        activeClub,
+        activeOwner,
+        latestPlayerManager,
+        playerMatch,
+        ownerInterventionNote
+      )
     : {
         author: 'League Executive Board',
         role: 'Official Digest',
@@ -1157,17 +1743,68 @@ export function advanceSimulationWeek(
       boardTrust: Math.min(100, finalDirector.boardTrust + 5),
       fanApproval: Math.min(100, finalDirector.fanApproval + 5),
     };
-    if (latestPlayerOwner) {
-      ownersMap.set(latestPlayerOwner.id, {
-        ...latestPlayerOwner,
-        approval: Math.min(100, latestPlayerOwner.approval + 5),
+    if (activeOwner) {
+      ownersMap.set(activeOwner.id, {
+        ...activeOwner,
+        approval: Math.min(100, activeOwner.approval + 5),
       });
     }
   }
 
-  const dressingRoomSnippet = latestPlayerManager
-    ? `Manager ${latestPlayerManager.name} reports squad morale is ${latestPlayerManager.trustInDirector > 60 ? 'high and aligned with board targets' : 'strained due to boardroom friction'}.`
-    : 'No active manager currently in the dugout.';
+  // Build dressing room snippet from live club state
+  const dressingRoomSnippet = (() => {
+    if (!activeClub) return 'Free-agent watch ongoing ahead of your next board appointment.';
+    const parts: string[] = [];
+    const avgHappiness = activeClub.squad.length > 0
+      ? Math.round(activeClub.squad.reduce((s, p) => s + p.happiness, 0) / activeClub.squad.length)
+      : 70;
+    const winStreak = countLeadingFormStreak(activeClub.form, 'W');
+    const lossStreak = countLeadingFormStreak(activeClub.form, 'L');
+    const unhappyPlayer = [...activeClub.squad].filter(p => p.happiness < 45).sort((a, b) => a.happiness - b.happiness)[0];
+    const injuredLeader = [...activeClub.squad].filter(p => p.isInjured).sort((a, b) => b.overall - a.overall)[0];
+    const expiringLeader = [...activeClub.squad]
+      .filter(p => !p.retiringAtSeasonEnd && p.contractYears <= 1)
+      .sort((a, b) => b.overall - a.overall)[0];
+    const latestSigning = newTransfers.find(tr => tr.type === 'signing' && tr.toClubId === activeClub.id);
+
+    if (winStreak >= 3) {
+      parts.push(`Confidence is soaring on a ${winStreak}-match winning run (avg morale ${avgHappiness}%).`);
+    } else if (lossStreak >= 2) {
+      parts.push(`Frustration is palpable in the camp after ${lossStreak} straight defeats (avg morale ${avgHappiness}%).`);
+    } else {
+      parts.push(
+        avgHappiness >= 74
+          ? `Mood in training is buoyant (${avgHappiness}% avg morale).`
+          : avgHappiness >= 56
+            ? `Squad spirit sits steady at ${avgHappiness}% avg morale.`
+            : `Dressing-room harmony is fragile at ${avgHappiness}% avg morale.`
+      );
+    }
+
+    if (unhappyPlayer) {
+      parts.push(`${unhappyPlayer.name} (${unhappyPlayer.happiness}% happiness) is unsettled over playing time.`);
+    } else if (injuredLeader) {
+      parts.push(`Physios are working closely with ${injuredLeader.name} (${injuredLeader.injuryWeeks || 1}w left).`);
+    } else if (latestSigning) {
+      parts.push(`New signing ${latestSigning.playerName} joined the group smoothly.`);
+    } else if (expiringLeader) {
+      parts.push(`${expiringLeader.name} is seeking clarity on his final contract year.`);
+    }
+
+    if (latestPlayerManager) {
+      parts.push(
+        latestPlayerManager.trustInDirector >= 65
+          ? `${latestPlayerManager.name} feels firmly backed by the board.`
+          : latestPlayerManager.trustInDirector < 40
+            ? `${latestPlayerManager.name} warns that boardroom friction is filtering onto the pitch.`
+            : `${latestPlayerManager.name} is focused on preparing the ${latestPlayerManager.preferredFormation} XI.`
+      );
+    } else {
+      parts.push('First-team coaches are holding sessions while the manager seat is vacant.');
+    }
+
+    return parts.slice(0, 3).join(' ');
+  })();
 
   const digest: WeeklyDigest = {
     week: currentWeek,
@@ -1184,6 +1821,9 @@ export function advanceSimulationWeek(
     ...(playerMatch && matchTeamRating !== undefined ? { matchTeamRating } : {}),
     ...(playerMatch && lineupNotices.length > 0 ? { lineupNotices } : {}),
     ...(academyWire.length > 0 ? { academyWire: academyWire.slice(0, 5) } : {}),
+    ...(delegationNote ? { delegationNote } : {}),
+    ...(delegationTrustDelta !== undefined ? { delegationTrustDelta } : {}),
+    ...(ownerInterventionNote ? { ownerInterventionNote } : {}),
   };
 
   const standingsSnapshot: Record<string, GameweekStandingsEntry> = {};
@@ -1279,8 +1919,13 @@ export function evaluateTakeoverEvents(
   return { updatedOwners, newsAlert };
 }
 
-// Generate Job Vacancies across pyramid
-export function generateJobVacancies(clubs: Club[], owners: Owner[], currentDirectorClubId: string | null): JobVacancy[] {
+// Generate Job Vacancies across pyramid with prestige-scaled reputation gates
+export function generateJobVacancies(
+  clubs: Club[],
+  owners: Owner[],
+  currentDirectorClubId: string | null,
+  directorReputation?: number
+): JobVacancy[] {
   const vacancies: JobVacancy[] = [];
   const ownersMap = new Map(owners.map(o => [o.id, o]));
 
@@ -1294,7 +1939,18 @@ export function generateJobVacancies(clubs: Club[], owners: Owner[], currentDire
     const isOwnerFrustrated = owner.approval < 55;
 
     if (isUnderperforming || isOwnerFrustrated || c.id === 'reading' || c.id === 'sheffwed') {
-      const repReq = c.tier === 1 ? 75 : c.tier === 2 ? 60 : 45;
+      const repReq =
+        c.tier === 1
+          ? Math.max(66, Math.min(90, Math.round(52 + c.prestige * 0.42)))
+          : c.tier === 2
+            ? Math.max(46, Math.min(72, Math.round(32 + c.prestige * 0.46)))
+            : Math.max(28, Math.min(54, Math.round(16 + c.prestige * 0.48)));
+
+      const lockReason =
+        directorReputation !== undefined && directorReputation < repReq
+          ? `Needs reputation ${repReq}, you have ${directorReputation}`
+          : undefined;
+
       vacancies.push({
         clubId: c.id,
         clubName: c.name,
@@ -1305,11 +1961,12 @@ export function generateJobVacancies(clubs: Club[], owners: Owner[], currentDire
         ownerName: owner.name,
         ownerPatience: owner.patience,
         reputationRequired: repReq,
+        ...(lockReason ? { lockReason } : {}),
       });
     }
   });
 
-  return vacancies;
+  return vacancies.sort((a, b) => a.tier - b.tier || a.reputationRequired - b.reputationRequired);
 }
 
 // Calculate the End of Season Review, Champions, Promotion, Relegation, and Board Appraisal
@@ -1374,27 +2031,141 @@ export function calculateSeasonSummary(
   const isPromoted = (playerTier === 2 || playerTier === 3) && playerPos <= 3;
   const isRelegated = (playerTier === 1 && playerPos >= 18) || (playerTier === 2 && playerPos >= 22) || (playerTier === 3 && playerPos >= 22);
 
-  // Compute Director grade
-  let directorGrade: SeasonSummary['directorGrade'] = 'B';
+  // Compute 5-Factor Director Grade Breakdown
   const exp = playerClub?.fanExpectation || 'Mid-Table Safety';
-
-  if (wonTrophy) {
-    directorGrade = 'A+';
-  } else if (isPromoted) {
-    directorGrade = 'A+';
+  let leagueScore = 60;
+  if (wonTrophy || isPromoted) {
+    leagueScore = 98;
   } else if (isRelegated) {
-    directorGrade = 'F';
+    leagueScore = 10;
   } else if (exp === 'Title Contender') {
-    directorGrade = playerPos <= 3 ? 'A' : playerPos <= 5 ? 'B' : 'D';
+    leagueScore = playerPos <= 2 ? 92 : playerPos <= 4 ? 82 : playerPos <= 6 ? 68 : 40;
   } else if (exp === 'European Qualification') {
-    directorGrade = playerPos <= 6 ? 'A' : playerPos <= 9 ? 'B' : 'C';
+    leagueScore = playerPos <= 5 ? 90 : playerPos <= 7 ? 80 : playerPos <= 10 ? 66 : 45;
   } else if (exp === 'Automatic Promotion') {
-    directorGrade = playerPos <= 3 ? 'A+' : playerPos <= 6 ? 'B' : 'D';
+    leagueScore = playerPos <= 3 ? 95 : playerPos <= 6 ? 76 : playerPos <= 10 ? 58 : 38;
   } else if (exp === 'Play-off Push') {
-    directorGrade = playerPos <= 6 ? 'A' : playerPos <= 10 ? 'B' : 'C';
+    leagueScore = playerPos <= 6 ? 88 : playerPos <= 10 ? 72 : playerPos <= 14 ? 56 : 40;
+  } else if (exp === 'Mid-Table Safety') {
+    leagueScore = playerPos <= 10 ? 86 : playerPos <= (playerTier === 1 ? 15 : 18) ? 72 : 52;
   } else if (exp === 'Avoid Relegation') {
-    directorGrade = !isRelegated ? (playerPos <= 12 ? 'A' : 'B') : 'F';
+    leagueScore = playerPos <= 12 ? 88 : playerPos <= (playerTier === 1 ? 17 : 21) ? 74 : 15;
   }
+
+  // Factor 2: 2-Season Transfer ROI (20%)
+  const roiSummary = playerClub
+    ? computeTransferROI(playerClub.id, seasonYear, clubs, freeAgents, transferHistory)
+    : null;
+  let roiScore = 65;
+  let roiDetail = 'No paid signings logged across the 2-season window.';
+  if (roiSummary && roiSummary.activeCount > 0) {
+    const avg = roiSummary.avgOvrDelta;
+    roiScore = Math.max(25, Math.min(98, Math.round(62 + avg * 9)));
+    roiDetail = `${roiSummary.activeCount} signing${roiSummary.activeCount === 1 ? '' : 's'} tracked · Avg ${avg >= 0 ? '+' : ''}${avg.toFixed(1)} OVR`;
+  }
+
+  // Factor 3: Net Spend & Treasury Discipline (15%)
+  const clubSeasonTransfers = playerClub
+    ? transferHistory.filter(tr => tr.season === seasonYear)
+    : [];
+  const seasonSpend = playerClub
+    ? clubSeasonTransfers
+        .filter(tr => tr.toClubId === playerClub.id && (tr.type === 'signing' || tr.type === 'release'))
+        .reduce((sum, tr) => sum + tr.fee, 0)
+    : 0;
+  const seasonSales = playerClub
+    ? clubSeasonTransfers
+        .filter(tr => tr.fromClubId === playerClub.id && tr.type === 'sale')
+        .reduce((sum, tr) => sum + tr.fee, 0)
+    : 0;
+  const netSpendSeason = seasonSpend - seasonSales;
+  const balanceHealthy = (playerClub?.balance ?? 0) >= 0;
+  let financeScore = 70;
+  if (!balanceHealthy) {
+    financeScore = 30;
+  } else if (netSpendSeason <= 0) {
+    financeScore = 90;
+  } else if (owner?.wealth === 'frugal') {
+    financeScore = netSpendSeason <= 10_000_000 ? 74 : 48;
+  } else if (owner?.wealth === 'moderate') {
+    financeScore = netSpendSeason <= 30_000_000 ? 76 : 56;
+  } else {
+    financeScore = netSpendSeason <= 75_000_000 ? 80 : 62;
+  }
+  const financeDetail = `Net ${netSpendSeason >= 0 ? `£${(netSpendSeason / 1_000_000).toFixed(1)}M spent` : `£${(Math.abs(netSpendSeason) / 1_000_000).toFixed(1)}M profit`} · Balance £${((playerClub?.balance || 0) / 1_000_000).toFixed(1)}M`;
+
+  // Factor 4: Academy Pathways (15%)
+  const academyPromotionsSeason = playerClub
+    ? transferHistory.filter(
+        tr => tr.season === seasonYear && tr.toClubId === playerClub.id && tr.type === 'promotion'
+      ).length
+    : 0;
+  const academyStrongCount = (playerClub?.academy || []).filter(
+    a => a.overall >= (playerTier === 1 ? 59 : playerTier === 2 ? 54 : 50)
+  ).length;
+  const academyScore = Math.max(
+    40,
+    Math.min(96, 52 + academyPromotionsSeason * 15 + Math.min(3, academyStrongCount) * 5)
+  );
+  const academyDetail = `${academyPromotionsSeason} senior promotion${academyPromotionsSeason === 1 ? '' : 's'} · ${academyStrongCount} high-grade scholar${academyStrongCount === 1 ? '' : 's'}`;
+
+  // Factor 5: Board & Owner Trust (15%)
+  const ownerApproval = owner?.approval ?? 65;
+  const trustScore = Math.max(10, Math.min(100, Math.round(director.boardTrust * 0.55 + ownerApproval * 0.45)));
+  const trustDetail = `Board Trust ${director.boardTrust}% · Owner Approval ${ownerApproval}%`;
+
+  const gradeBreakdown: DirectorGradeFactor[] = [
+    {
+      id: 'league',
+      label: 'League vs Expectation',
+      score: leagueScore,
+      weight: 35,
+      detail: `#${playerPos} finish against "${exp}" target`,
+    },
+    {
+      id: 'roi',
+      label: 'Transfer ROI (2-Season)',
+      score: roiScore,
+      weight: 20,
+      detail: roiDetail,
+    },
+    {
+      id: 'finances',
+      label: 'Net Spend & Cash',
+      score: financeScore,
+      weight: 15,
+      detail: financeDetail,
+    },
+    {
+      id: 'academy',
+      label: 'Academy Pathways',
+      score: academyScore,
+      weight: 15,
+      detail: academyDetail,
+    },
+    {
+      id: 'trust',
+      label: 'Board & Owner Trust',
+      score: trustScore,
+      weight: 15,
+      detail: trustDetail,
+    },
+  ];
+
+  const weightedTotal = Math.round(
+    gradeBreakdown.reduce((sum, f) => sum + (f.score * f.weight) / 100, 0)
+  );
+
+  let directorGrade: SeasonSummary['directorGrade'] =
+    weightedTotal >= 88 ? 'A+' :
+    weightedTotal >= 76 ? 'A' :
+    weightedTotal >= 62 ? 'B' :
+    weightedTotal >= 46 ? 'C' :
+    weightedTotal >= 30 ? 'D' : 'F';
+
+  if (wonTrophy) directorGrade = 'A+';
+  else if (isPromoted && directorGrade !== 'A+') directorGrade = 'A';
+  else if (isRelegated) directorGrade = 'F';
 
   // Financial disbursements
   const prizeMoney = playerTier === 1 
@@ -1405,16 +2176,19 @@ export function calculateSeasonSummary(
 
   const tvRevenue = playerTier === 1 ? 88000000 : playerTier === 2 ? 18000000 : 4000000;
 
-  // Owner evaluation commentary
+  // Owner evaluation commentary grounded in strongest & weakest factors
   const ownerName = owner?.name || 'The Board';
+  const sortedFactors = [...gradeBreakdown].sort((a, b) => b.score - a.score);
+  const strongestFactor = sortedFactors[0];
+  const weakestFactor = sortedFactors[sortedFactors.length - 1];
   let ownerEvaluation = '';
 
   if (directorGrade === 'A+' || directorGrade === 'A') {
-    ownerEvaluation = `Outstanding campaign! ${ownerName} and the entire executive committee are thrilled with our finish at #${playerPos}. Your strategic acquisitions have transformed our club. Additional summer transfer capital has been unlocked.`;
+    ownerEvaluation = `Outstanding campaign! ${ownerName} applauds our #${playerPos} finish (${weightedTotal}/100 overall score), led by ${strongestFactor.label} (${strongestFactor.score}/100). Additional summer capital has been unlocked.`;
   } else if (directorGrade === 'B') {
-    ownerEvaluation = `A respectable season. We finished #${playerPos}, fulfilling our core targets. For the next campaign, the board expects us to build on this foundation and push for greater heights.`;
+    ownerEvaluation = `A solid campaign at #${playerPos} (${weightedTotal}/100 score). Strong work on ${strongestFactor.label} (${strongestFactor.score}/100), though the board wants improvement in ${weakestFactor.label} (${weakestFactor.score}/100) next season.`;
   } else if (directorGrade === 'C' || directorGrade === 'D') {
-    ownerEvaluation = `A deeply underwhelming campaign. Finishing #${playerPos} has disappointed supporters and board members alike. Significant squad restructuring will be required in the summer.`;
+    ownerEvaluation = `An underwhelming campaign finishing #${playerPos} (${weightedTotal}/100 score). ${weakestFactor.label} (${weakestFactor.score}/100) dragged down our assessment and requires urgent off-season correction.`;
   } else {
     ownerEvaluation = `CATASTROPHIC FAILURE. Relegation is a devastating financial and sporting disaster for ${playerClub?.name}. The board is convening an emergency review of all football operations.`;
   }
@@ -1462,6 +2236,10 @@ export function calculateSeasonSummary(
     retirements,
     totalLeaguePromotions: seasonPromotions.length,
     topLeagueGraduates,
+    gradeBreakdown,
+    transferRoiDelta: roiSummary ? Number(roiSummary.avgOvrDelta.toFixed(1)) : 0,
+    netSpendSeason,
+    academyPromotionsSeason,
   };
 }
 
@@ -1596,7 +2374,8 @@ export function replenishAISquad(
     if (club.squad.length >= 25) break;
 
     const currentWages = club.squad.reduce((sum, p) => sum + p.wage, 0);
-    const wageHeadroom = Math.max(6000, club.wageBudget - currentWages);
+    const wageHeadroom = Math.max(0, club.wageBudget - currentWages);
+    const freeAgentCap = club.squad.length < 18 && wageHeadroom === 0 ? 2500 : wageHeadroom;
 
     // 1. Prioritize promoting an aged 17-18 prospect from the club's own Youth Academy
     const academyMatches = (club.academy || [])
@@ -1604,7 +2383,7 @@ export function replenishAISquad(
       .sort((a, b) => b.overall - a.overall);
     if (academyMatches.length > 0) {
       const chosen = academyMatches[0];
-      const promoWage = getAcademyPromotionWage(club.tier);
+      const promoWage = Math.min(getAcademyPromotionWage(club.tier), Math.max(1000, wageHeadroom));
       const promoted = buildPromotedPlayerFromProspect(chosen, club, promoWage, 3);
       club.squad.push(promoted);
       club.academy = (club.academy || []).filter(a => a.id !== chosen.id);
@@ -1614,7 +2393,7 @@ export function replenishAISquad(
     // 2. Next try finding best free agent for this position within wage budget
     const eligible = freeAgentsPool
       .map((fa, idx) => ({ fa, idx }))
-      .filter(item => item.fa.position === pos && item.fa.wage <= wageHeadroom)
+      .filter(item => item.fa.position === pos && item.fa.wage <= freeAgentCap)
       .sort((a, b) => b.fa.overall - a.fa.overall);
 
     if (eligible.length > 0) {
@@ -1633,8 +2412,9 @@ export function replenishAISquad(
       signedPlayer.retiringAtSeasonEnd = false;
       club.squad.push(signedPlayer);
     } else {
-      // 3. Last resort: graduate an unlisted youth squad member
+      // 3. Last resort: graduate an unlisted youth squad member capped to wage headroom
       const filler = generateEmergencyFillerPlayer(club, pos, usedNames);
+      filler.wage = Math.min(filler.wage, Math.max(800, wageHeadroom));
       club.squad.push(filler);
     }
   }
@@ -1737,7 +2517,8 @@ export function advanceToNextSeason(
   freeAgents: Player[],
   director: Director,
   delegation?: DelegationMatrix,
-  transferHistory: TransferRecord[] = []
+  transferHistory: TransferRecord[] = [],
+  modeOptions?: SimulationModeOptions
 ): {
   newClubs: Club[];
   newOwners: Owner[];
@@ -1747,6 +2528,7 @@ export function advanceToNextSeason(
   newSeasonYear: number;
   newTransfers: TransferRecord[];
 } {
+  const isManagerMode = modeOptions?.gameMode === 'manager';
   const seasonTransitionTransfers: TransferRecord[] = [];
   const updatedClubs = clubs.map(c => ({
     ...c,
@@ -1828,6 +2610,7 @@ export function advanceToNextSeason(
     club.goalDifference = 0;
     club.points = 0;
     club.form = [];
+    club.managerSacksThisSeason = 0;
 
     // Financial injection for new season (TV rights + earned merit prize money)
     const tvCash = club.tier === 1 ? 88000000 : club.tier === 2 ? 18000000 : 4000000;
@@ -1846,36 +2629,34 @@ export function advanceToNextSeason(
         return; // Player retires from football
       }
 
-      const agedPlayer = { ...p };
-      agedPlayer.age += 1;
-      agedPlayer.retiringAtSeasonEnd = false;
-      agedPlayer.contractYears = Math.max(0, agedPlayer.contractYears - 1);
-      agedPlayer.goals = 0;
-      agedPlayer.assists = 0;
-      agedPlayer.appearances = 0;
-      agedPlayer.cleanSheets = 0;
-      agedPlayer.isInjured = false;
-      agedPlayer.injuryWeeks = 0;
-
-      // Natural dynamic progression up to 99 max rating
-      if (agedPlayer.age <= 24 && agedPlayer.overall < 99) {
-        const gain = Math.floor(Math.random() * 3) + 1;
-        agedPlayer.overall = Math.min(99, agedPlayer.overall + gain);
-        agedPlayer.value = Math.round(agedPlayer.value * 1.25);
-      } else if (agedPlayer.age <= 29 && agedPlayer.overall < 99 && Math.random() < 0.45) {
-        agedPlayer.overall = Math.min(99, agedPlayer.overall + 1);
-        agedPlayer.value = Math.round(agedPlayer.value * 1.15);
-      } else if (agedPlayer.age >= 32 && Math.random() < 0.5) {
-        agedPlayer.overall = Math.max(45, agedPlayer.overall - Math.floor(Math.random() * 2) - 1);
-        agedPlayer.value = Math.round(agedPlayer.value * 0.8);
-      }
-      agedPlayer.growthMomentum = computeGrowthMomentum(agedPlayer);
+      const agedPlayer = applyNaturalAnnualGrowth({
+        ...p,
+        age: p.age + 1,
+        retiringAtSeasonEnd: false,
+        contractYears: Math.max(0, p.contractYears - 1),
+        goals: 0,
+        assists: 0,
+        appearances: 0,
+        cleanSheets: 0,
+        isInjured: false,
+        injuryWeeks: 0,
+      });
       agedNonRetiringSquad.push(agedPlayer);
     });
 
-    // If Coach-led renewals are active for user's club, give the Head Coach a final pass on expiring contracts before free-agency release
+    // If Coach-led renewals are active in Director Mode OR AI Sporting Director in Manager Mode, handle expiring contracts
     let postRenewalSquad = agedNonRetiringSquad;
-    if (isUserClub && delegation?.contractRenewals === 'manager') {
+    if (isUserClub && isManagerMode && modeOptions?.clubDirector) {
+      const eosPass = runManagerModeSeasonEndRenewals(
+        { ...club, squad: agedNonRetiringSquad },
+        modeOptions.clubDirector,
+        summary.seasonYear
+      );
+      postRenewalSquad = eosPass.updatedClub.squad;
+      if (eosPass.renewalRecords.length > 0) {
+        seasonTransitionTransfers.push(...eosPass.renewalRecords);
+      }
+    } else if (isUserClub && !isManagerMode && delegation?.contractRenewals === 'manager') {
       const clubManager = club.managerId ? managers.find(m => m.id === club.managerId) : undefined;
       const renewalPass = runManagerContractRenewals({
         myClubId: club.id,
@@ -1946,57 +2727,54 @@ export function advanceToNextSeason(
       replenishAISquad(club, updatedFreeAgents, usedNames);
       club.lineup = undefined;
     } else if (club.lineup) {
-      const clubManager = club.managerId ? managers.find(m => m.id === club.managerId) : undefined;
+      const clubManager =
+        isManagerMode && modeOptions?.userManagerAdapter
+          ? modeOptions.userManagerAdapter
+          : (club.managerId ? managers.find(m => m.id === club.managerId) : undefined);
       club.lineup = syncLineupAfterSquadChange(club, clubManager);
     }
 
-    // 4. Youth Academy annual aging & replenishment
-    const existingAcademy = club.academy || [];
+    // 4. Youth Academy annual aging & replenishment (same natural growth system as all players; 7 generated 1-2-2-2 + max 10 cap)
+    const existingAcademy = (club.academy || []).map(a => normalizeAcademyPlayer(a, club));
     const retainedAcademy: AcademyPlayer[] = [];
     existingAcademy.forEach(p => {
       const nextAge = p.age + 1;
-      if (nextAge <= 18) {
-        const momentumGain = p.momentumTier === 'Generational Prodigy' ? 4 :
-                             p.momentumTier === 'High Tempo' ? 3 :
-                             p.momentumTier === 'Late Surge' ? 3 : 2;
-        const ovrGain = Math.floor(Math.random() * momentumGain) + 1;
+      if (nextAge <= YOUTH_ACADEMY_CONFIG.ageRange.max) {
+        const baseAsPlayer = academyPlayerToPlayer({ ...p, age: nextAge }, club);
+        const grown = applyNaturalAnnualGrowth(baseAsPlayer);
         retainedAcademy.push({
           ...p,
           age: nextAge,
-          overall: Math.min(99, p.overall + ovrGain),
+          overall: grown.overall,
+          value: grown.value,
+          growthMomentum: grown.growthMomentum,
+          form: grown.form,
+          happiness: grown.happiness,
+          morale: grown.morale,
         });
-      } else if (p.overall >= 56 && updatedFreeAgents.length < 130) {
-        // Release viable 19yo unpromoted academy graduates into free agency so talent circulates
+      } else if (p.overall >= 54 && updatedFreeAgents.length < 130) {
+        // Release viable 19yo unpromoted academy graduates into free agency so talent circulates (no penalties)
         const baseWage = getAcademyPromotionWage(club.tier);
-        const valMultiplier = club.tier === 1 ? 750000 : club.tier === 2 ? 200000 : 55000;
         updatedFreeAgents.push({
+          ...academyPlayerToPlayer(p, club),
           id: `p_fa_acad_${p.id}`,
-          name: p.name,
-          nationality: p.nationality,
-          age: 19,
-          position: p.position,
-          roleDetail: p.roleDetail,
-          overall: p.overall,
-          growthMomentum: p.momentumTier === 'Generational Prodigy' ? 'breakout' : p.momentumTier === 'High Tempo' ? 'rapid' : 'steady',
-          value: Math.max(45000, Math.round(p.overall * p.overall * valMultiplier * 0.0025)),
+          age: nextAge,
           wage: Math.max(800, Math.round(baseWage * 0.75)),
           contractYears: 0,
           form: 6.5,
           happiness: 72,
           morale: 'content',
-          goals: 0,
-          assists: 0,
-          appearances: 0,
-          cleanSheets: 0,
           clubId: null,
         });
       }
     });
 
-    // Ingest new youth cohort (3 to 5 young prospects, ensuring 5-7 active prospects at every club)
-    const targetCount = Math.max(3, 6 - retainedAcademy.length);
-    const freshIntake = generateYouthIntake(club, summary.seasonYear + 1, targetCount, usedNames);
-    club.academy = [...retainedAcademy, ...freshIntake];
+    // Restore missing generated-style positions (1 GK, 2 DEF, 2 MID, 2 FWD) up to 7 generated, hard-capped at 10 total
+    club.academy = replenishClubAcademy(
+      { ...club, academy: retainedAcademy },
+      summary.seasonYear + 1,
+      usedNames
+    );
   });
 
   // Clean the free agent pool each season: apply retirements (33-42), drop players under 54 OVR, and keep top 140
@@ -2022,24 +2800,110 @@ export function advanceToNextSeason(
       cleanSheets: 0,
     }));
 
-  // 5. Age Managers
-  const updatedManagers = managers.map(m => ({
-    ...m,
-    age: m.age + 1,
-    contractYears: Math.max(0, m.contractYears - 1),
-  }));
+  // 5. Age Managers (Fixed pool: managers never retire and no new managers are ever generated)
+  const tierAwards = [summary.tier1, summary.tier2, summary.tier3];
+  const championByClubId = new Map<string, { tierName: string; clubName: string; points: number }>();
+  const promotedByClubId = new Map<string, { tierName: string; clubName: string }>();
+  const relegatedByClubId = new Map<string, { tierName: string; clubName: string }>();
 
-  // 6. Update Director Record
+  tierAwards.forEach(award => {
+    championByClubId.set(award.champion.id, {
+      tierName: award.tierName,
+      clubName: award.champion.name,
+      points: award.champion.points,
+    });
+    award.promotedClubs.forEach(c => {
+      promotedByClubId.set(c.id, { tierName: award.tierName, clubName: c.name });
+    });
+    award.relegatedClubs.forEach(c => {
+      relegatedByClubId.set(c.id, { tierName: award.tierName, clubName: c.name });
+    });
+  });
+
+  const updatedManagers = managers.map(m => {
+    const baseAttrs = m.attributes ? { ...m.attributes } : deriveManagerAttributes(m);
+    const stats = getManagerCareerStats(m);
+    let repDelta = 0;
+    let nextStats = { ...stats };
+    let nextMgr: Manager = {
+      ...m,
+      age: m.age + 1,
+      seasonsAtClub: m.clubId ? (m.seasonsAtClub ?? 0) + 1 : 0,
+      attributes: baseAttrs,
+      careerStats: nextStats,
+    };
+
+    if (m.clubId) {
+      const champInfo = championByClubId.get(m.clubId);
+      const promInfo = promotedByClubId.get(m.clubId);
+      const relInfo = relegatedByClubId.get(m.clubId);
+
+      if (champInfo) {
+        repDelta = 2;
+        nextStats = {
+          ...nextStats,
+          titlesWon: nextStats.titlesWon + 1,
+          ...(promInfo ? { promotionsWon: nextStats.promotionsWon + 1 } : {}),
+        };
+        nextMgr = { ...nextMgr, careerStats: nextStats };
+        nextMgr = appendManagerHistory(nextMgr, {
+          season: summary.seasonYear,
+          week: 46,
+          type: 'league_title',
+          title: `Won ${champInfo.tierName} Title`,
+          detail: `Guided ${champInfo.clubName} to the ${summary.seasonYear}/${summary.seasonYear + 1} ${champInfo.tierName} championship (${champInfo.points} pts).`,
+          clubId: m.clubId,
+          clubName: champInfo.clubName,
+        });
+      } else if (promInfo) {
+        repDelta = 1;
+        nextStats = { ...nextStats, promotionsWon: nextStats.promotionsWon + 1 };
+        nextMgr = { ...nextMgr, careerStats: nextStats };
+        nextMgr = appendManagerHistory(nextMgr, {
+          season: summary.seasonYear,
+          week: 46,
+          type: 'promotion',
+          title: `Promoted with ${promInfo.clubName}`,
+          detail: `Earned promotion from ${promInfo.tierName} in ${summary.seasonYear}/${summary.seasonYear + 1}.`,
+          clubId: m.clubId,
+          clubName: promInfo.clubName,
+        });
+      } else if (relInfo) {
+        repDelta = -1;
+        nextMgr = appendManagerHistory(nextMgr, {
+          season: summary.seasonYear,
+          week: 46,
+          type: 'relegation',
+          title: `Relegated with ${relInfo.clubName}`,
+          detail: `Suffered relegation from ${relInfo.tierName} at the end of ${summary.seasonYear}/${summary.seasonYear + 1}.`,
+          clubId: m.clubId,
+          clubName: relInfo.clubName,
+        });
+      }
+    }
+
+    return repDelta !== 0 ? applyManagerReputationChange(nextMgr, repDelta) : nextMgr;
+  });
+
+  // 6. Update Director Record (grade + user retirement legacy; zero penalty for academy flops)
+  const retirementLegacyRep = Math.min(
+    3,
+    (summary.retirements || []).filter(r => r.isUserClub && r.overall >= 74).length
+  );
+  const gradeRepDelta =
+    summary.directorGrade === 'A+' ? 8 :
+    summary.directorGrade === 'A' ? 5 :
+    summary.directorGrade === 'B' ? 2 :
+    summary.directorGrade === 'C' ? -2 :
+    summary.directorGrade === 'D' ? -5 : -10;
+
   const newDirector: Director = {
     ...director,
     yearsInCharge: director.yearsInCharge + 1,
-    reputation: Math.max(10, Math.min(100, director.reputation + (
-      summary.directorGrade === 'A+' ? 8 :
-      summary.directorGrade === 'A' ? 5 :
-      summary.directorGrade === 'B' ? 2 :
-      summary.directorGrade === 'C' ? -2 :
-      summary.directorGrade === 'D' ? -5 : -10
-    ))),
+    reputation: Math.max(
+      10,
+      Math.min(100, director.reputation + gradeRepDelta + retirementLegacyRep)
+    ),
     boardTrust: 80,
     fanApproval: summary.directorGrade === 'F' ? 40 : 75,
     trophiesWon: summary.playerClubWonTrophy 
@@ -2130,62 +2994,258 @@ const SCOUT_NOTES: Record<ProspectTrait, string[]> = {
   ],
 };
 
+export function applyNaturalAnnualGrowth<
+  T extends Pick<Player, 'age' | 'overall' | 'value' | 'form' | 'happiness' | 'growthMomentum'>
+>(player: T): T {
+  const updated = { ...player };
+  if (updated.age <= 24 && updated.overall < 99) {
+    const gain = Math.floor(Math.random() * 3) + 1;
+    updated.overall = Math.min(99, updated.overall + gain);
+    updated.value = Math.round(updated.value * 1.25);
+  } else if (updated.age <= 29 && updated.overall < 99 && Math.random() < 0.45) {
+    updated.overall = Math.min(99, updated.overall + 1);
+    updated.value = Math.round(updated.value * 1.15);
+  } else if (updated.age >= 32 && Math.random() < 0.5) {
+    updated.overall = Math.max(45, updated.overall - Math.floor(Math.random() * 2) - 1);
+    updated.value = Math.round(updated.value * 0.8);
+  }
+  updated.growthMomentum = computeGrowthMomentum({
+    age: updated.age,
+    overall: updated.overall,
+    form: updated.form,
+    happiness: updated.happiness,
+  } as Player);
+  return updated;
+}
+
+export function calculateAcademyPlayerValue(overall: number, tier: LeagueTier): number {
+  const base = Math.pow(Math.max(44, overall) - 40, 2) * 1800;
+  const tierMult = tier === 1 ? 1.4 : tier === 2 ? 1.0 : 0.65;
+  return Math.max(100000, Math.round((base * tierMult) / 25000) * 25000);
+}
+
+export function normalizeAcademyPlayer(
+  prospect: AcademyPlayer,
+  club: Pick<Club, 'id' | 'tier'>
+): AcademyPlayer {
+  const form = typeof prospect.form === 'number' ? prospect.form : 6.5;
+  const happiness = typeof prospect.happiness === 'number' ? prospect.happiness : 80;
+  const morale: MoraleLevel = prospect.morale ?? deriveMorale(happiness);
+  const value =
+    typeof prospect.value === 'number' && prospect.value > 0
+      ? prospect.value
+      : calculateAcademyPlayerValue(prospect.overall, club.tier);
+  const wage =
+    typeof prospect.wage === 'number' && prospect.wage > 0
+      ? prospect.wage
+      : Math.max(500, Math.round(getAcademyPromotionWage(club.tier) * 0.5));
+  const growthMomentum: GrowthMomentum =
+    prospect.growthMomentum ??
+    computeGrowthMomentum({
+      age: prospect.age,
+      overall: prospect.overall,
+      form,
+      happiness,
+    } as Player);
+
+  return {
+    ...prospect,
+    clubId: prospect.clubId ?? club.id,
+    origin: prospect.origin ?? 'generated',
+    form,
+    happiness,
+    morale,
+    value,
+    wage,
+    contractYears: prospect.contractYears ?? 2,
+    goals: prospect.goals ?? 0,
+    assists: prospect.assists ?? 0,
+    appearances: prospect.appearances ?? 0,
+    cleanSheets: prospect.cleanSheets ?? 0,
+    growthMomentum,
+  };
+}
+
+export function academyPlayerToPlayer(
+  prospect: AcademyPlayer,
+  club: Pick<Club, 'id' | 'tier'>
+): Player {
+  const normalized = normalizeAcademyPlayer(prospect, club);
+  return {
+    id: normalized.id,
+    name: normalized.name,
+    nationality: normalized.nationality,
+    age: normalized.age,
+    position: normalized.position,
+    roleDetail: normalized.roleDetail,
+    overall: normalized.overall,
+    growthMomentum: normalized.growthMomentum,
+    value: normalized.value!,
+    wage: normalized.wage!,
+    contractYears: normalized.contractYears ?? 2,
+    form: normalized.form!,
+    happiness: normalized.happiness!,
+    morale: normalized.morale!,
+    goals: normalized.goals ?? 0,
+    assists: normalized.assists ?? 0,
+    appearances: normalized.appearances ?? 0,
+    cleanSheets: normalized.cleanSheets ?? 0,
+    clubId: club.id,
+  };
+}
+
+const DEFAULT_GENERATED_POSITIONS: PlayerPosition[] = [
+  'GK',
+  'DEF',
+  'DEF',
+  'MID',
+  'MID',
+  'FWD',
+  'FWD',
+];
+
+function createSingleAcademyPlayer(
+  club: Club,
+  seasonYear: number,
+  pos: PlayerPosition,
+  indexSeed: number,
+  usedNames?: Set<string>
+): AcademyPlayer {
+  const name = pickUniqueName(usedNames, YOUTH_FIRST_NAMES, YOUTH_LAST_NAMES);
+  const { min: minAge, max: maxAge } = YOUTH_ACADEMY_CONFIG.ageRange;
+  const age = minAge + Math.floor(Math.random() * (maxAge - minAge + 1));
+  const trait = PROSPECT_TRAITS[Math.floor(Math.random() * PROSPECT_TRAITS.length)];
+  const roleList = YOUTH_ROLES[pos];
+  const roleDetail = roleList[Math.floor(Math.random() * roleList.length)];
+
+  const repBand = getAcademyRatingRangeForReputation(club.prestige);
+  const span = Math.max(1, repBand.maxOverall - repBand.minOverall + 1);
+  const overall = Math.max(
+    YOUTH_ACADEMY_CONFIG.overallFloor,
+    Math.min(
+      YOUTH_ACADEMY_CONFIG.overallCeiling,
+      repBand.minOverall + Math.floor(Math.random() * span)
+    )
+  );
+
+  const form = 6.5;
+  const happiness = 80;
+  const morale = deriveMorale(happiness);
+  const value = calculateAcademyPlayerValue(overall, club.tier);
+  const wage = Math.max(500, Math.round(getAcademyPromotionWage(club.tier) * 0.5));
+  const growthMomentum = computeGrowthMomentum({
+    age,
+    overall,
+    form,
+    happiness,
+  } as Player);
+
+  const momentumTier: MomentumTier =
+    growthMomentum === 'breakout'
+      ? 'Generational Prodigy'
+      : growthMomentum === 'rapid'
+        ? 'High Tempo'
+        : 'Steady Climber';
+
+  const notesList = SCOUT_NOTES[trait];
+  const scoutReport = notesList[Math.floor(Math.random() * notesList.length)];
+
+  return {
+    id: `acad_${club.id}_${seasonYear}_${indexSeed}_${Math.random().toString(36).substring(2, 7)}`,
+    name,
+    nationality: pickProspectNationality(club.tier),
+    age,
+    position: pos,
+    roleDetail,
+    overall,
+    origin: 'generated',
+    growthMomentum,
+    value,
+    wage,
+    contractYears: 2,
+    form,
+    happiness,
+    morale,
+    goals: 0,
+    assists: 0,
+    appearances: 0,
+    cleanSheets: 0,
+    momentumTier,
+    trait,
+    scoutReport,
+    graduatingSeason: seasonYear,
+    clubId: club.id,
+  };
+}
+
 export function generateYouthIntake(
   club: Club,
   seasonYear: number,
-  count = 5,
+  count: number = YOUTH_ACADEMY_CONFIG.generatedSlots,
+  usedNames?: Set<string>,
+  positionsOverride?: PlayerPosition[]
+): AcademyPlayer[] {
+  const positions =
+    positionsOverride ??
+    Array.from({ length: count }, (_, idx) => DEFAULT_GENERATED_POSITIONS[idx % DEFAULT_GENERATED_POSITIONS.length]);
+
+  return positions.map((pos, idx) =>
+    createSingleAcademyPlayer(club, seasonYear, pos, idx, usedNames)
+  );
+}
+
+/**
+ * Ensures a club's academy respects the hard cap of 10 players and restores
+ * any missing generated-style slots so the 7-slot position split (1 GK, 2 DEF, 2 MID, 2 FWD)
+ * is maintained while preserving up to 3 poached spots.
+ */
+export function replenishClubAcademy(
+  club: Club,
+  seasonYear: number,
   usedNames?: Set<string>
 ): AcademyPlayer[] {
-  const prospects: AcademyPlayer[] = [];
-  const positions: PlayerPosition[] = ['GK', 'DEF', 'DEF', 'MID', 'MID', 'FWD'];
+  const current = (club.academy || [])
+    .map(a => normalizeAcademyPlayer(a, club))
+    .slice(0, YOUTH_ACADEMY_CONFIG.totalCapacity);
 
-  for (let i = 0; i < count; i++) {
-    const pos = positions[i % positions.length];
-    const name = pickUniqueName(usedNames, YOUTH_FIRST_NAMES, YOUTH_LAST_NAMES);
-    const age = 15 + Math.floor(Math.random() * 4); // 15 to 18
-    const trait = PROSPECT_TRAITS[Math.floor(Math.random() * PROSPECT_TRAITS.length)];
-    const roleList = YOUTH_ROLES[pos];
-    const roleDetail = roleList[Math.floor(Math.random() * roleList.length)];
+  const generatedCounts: Record<PlayerPosition, number> = {
+    GK: 0,
+    DEF: 0,
+    MID: 0,
+    FWD: 0,
+  };
 
-    // Overall baseline influenced by club tier and prestige
-    const prestigeMod = club.prestige >= 82 ? 2 : club.prestige <= 55 ? -1 : 0;
-    const baseOvr = (club.tier === 1 ? 56 : club.tier === 2 ? 51 : 47) + prestigeMod;
-    const traitBoost = trait === 'Generational Prodigy' ? 4 : 0;
-    const overall = Math.max(45, Math.min(71, baseOvr + traitBoost + Math.floor(Math.random() * 9) - 3));
-
-    // Determine growth momentum tier (replaces pre-determined potential caps)
-    let momentumTier: MomentumTier = 'Steady Climber';
-    if (trait === 'Generational Prodigy') {
-      momentumTier = 'Generational Prodigy';
-    } else if (trait === 'Late Bloomer') {
-      momentumTier = 'Late Surge';
-    } else if (trait === 'Technical Magician' || trait === 'Driven Workhorse') {
-      momentumTier = Math.random() > 0.4 ? 'High Tempo' : 'Steady Climber';
-    } else {
-      const rand = Math.random();
-      momentumTier = rand > 0.7 ? 'High Tempo' : rand > 0.3 ? 'Steady Climber' : 'Late Surge';
+  current.forEach(p => {
+    if (p.origin !== 'poached') {
+      generatedCounts[p.position] += 1;
     }
+  });
 
-    const notesList = SCOUT_NOTES[trait];
-    const scoutReport = notesList[Math.floor(Math.random() * notesList.length)];
+  const missingPositions: PlayerPosition[] = [];
+  (['GK', 'DEF', 'MID', 'FWD'] as PlayerPosition[]).forEach(pos => {
+    const target = YOUTH_ACADEMY_CONFIG.positionSplit[pos];
+    const missing = Math.max(0, target - generatedCounts[pos]);
+    for (let i = 0; i < missing; i++) {
+      missingPositions.push(pos);
+    }
+  });
 
-    prospects.push({
-      id: `acad_${club.id}_${seasonYear}_${i}_${Math.random().toString(36).substring(2, 7)}`,
-      name,
-      nationality: pickProspectNationality(club.tier),
-      age,
-      position: pos,
-      roleDetail,
-      overall,
-      momentumTier,
-      trait,
-      scoutReport,
-      graduatingSeason: seasonYear,
-      clubId: club.id,
-    });
+  const remainingCapacity = Math.max(0, YOUTH_ACADEMY_CONFIG.totalCapacity - current.length);
+  const positionsToGenerate = missingPositions.slice(0, remainingCapacity);
+
+  if (positionsToGenerate.length === 0) {
+    return current;
   }
 
-  return prospects;
+  const generated = generateYouthIntake(
+    club,
+    seasonYear,
+    positionsToGenerate.length,
+    usedNames,
+    positionsToGenerate
+  );
+
+  return [...current, ...generated].slice(0, YOUTH_ACADEMY_CONFIG.totalCapacity);
 }
 
 function buildPromotedPlayerFromProspect(
@@ -2194,27 +3254,13 @@ function buildPromotedPlayerFromProspect(
   wage: number,
   contractYears: number
 ): Player {
-  const valMultiplier = club.tier === 1 ? 800000 : club.tier === 2 ? 220000 : 60000;
-  const value = Math.max(50000, Math.round(prospect.overall * prospect.overall * valMultiplier * 0.003));
-
-  const startingMomentum: GrowthMomentum =
-    prospect.momentumTier === 'Generational Prodigy' ? 'breakout' :
-    prospect.momentumTier === 'High Tempo' ? 'rapid' : 'steady';
-
+  const asPlayer = academyPlayerToPlayer(prospect, club);
   return {
+    ...asPlayer,
     id: `p_promoted_${prospect.id}_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
-    name: prospect.name,
-    nationality: prospect.nationality,
-    age: prospect.age,
-    position: prospect.position,
-    roleDetail: prospect.roleDetail,
-    overall: prospect.overall,
-    growthMomentum: startingMomentum,
-    value,
     wage,
     contractYears,
-    form: 6.8,
-    happiness: 95,
+    happiness: 88,
     morale: 'ecstatic',
     goals: 0,
     assists: 0,
@@ -2396,26 +3442,16 @@ function runAIAcademyPromotionsForWeek({
   return { newTransfers, wireEvents };
 }
 
-export const MAX_USER_ACADEMY_CAPACITY = 12;
+export const MAX_USER_ACADEMY_CAPACITY = YOUTH_ACADEMY_CONFIG.totalCapacity;
 
 export function calculatePoachCompensation(
   prospect: AcademyPlayer,
   sellingClub: Club
 ): number {
-  const base = Math.pow(Math.max(45, prospect.overall) - 40, 2) * 1800;
-  const momentumMult =
-    prospect.momentumTier === 'Generational Prodigy'
-      ? 2.0
-      : prospect.momentumTier === 'High Tempo'
-        ? 1.4
-        : prospect.momentumTier === 'Late Surge'
-          ? 1.2
-          : 1.0;
-  const tierMult = sellingClub.tier === 1 ? 1.4 : sellingClub.tier === 2 ? 1.0 : 0.65;
-  const ageMult = prospect.age <= 16 ? 1.15 : 1.0;
-
-  const raw = base * momentumMult * tierMult * ageMult;
-  return Math.max(100000, Math.round(raw / 25000) * 25000);
+  if (typeof prospect.value === 'number' && prospect.value > 0) {
+    return prospect.value;
+  }
+  return calculateAcademyPlayerValue(prospect.overall, sellingClub.tier);
 }
 
 export interface PoachEvaluationResult {
@@ -2431,7 +3467,7 @@ export function evaluatePoachProspect({
   buyingClub,
   owner,
   offeredFee,
-  destination,
+  destination = 'academy',
   wage,
 }: {
   prospect: AcademyPlayer;
@@ -2439,7 +3475,7 @@ export function evaluatePoachProspect({
   buyingClub: Club;
   owner?: Owner;
   offeredFee: number;
-  destination: 'academy' | 'senior';
+  destination?: 'academy' | 'senior';
   wage?: number;
 }): PoachEvaluationResult {
   const compensationFee = calculatePoachCompensation(prospect, sellingClub);
@@ -2454,33 +3490,16 @@ export function evaluatePoachProspect({
     };
   }
 
-  if (destination === 'senior' && prospect.age < 17) {
+  if (destination === 'academy' && (buyingClub.academy?.length || 0) >= YOUTH_ACADEMY_CONFIG.totalCapacity) {
     return {
       ok: false,
-      reason: `${prospect.name} is ${prospect.age} and must enter your Youth Academy until age 17.`,
-      compensationFee,
-      minAcceptableFee,
-    };
-  }
-
-  if (destination === 'academy' && (buyingClub.academy?.length || 0) >= MAX_USER_ACADEMY_CAPACITY) {
-    return {
-      ok: false,
-      reason: `Your Youth Academy is at maximum capacity (${MAX_USER_ACADEMY_CAPACITY} prospects). Promote or release a scholar first.`,
+      reason: `Your Youth Academy is full (${YOUTH_ACADEMY_CONFIG.totalCapacity}/${YOUTH_ACADEMY_CONFIG.totalCapacity}). Promote, sell, or release a player first.`,
       compensationFee,
       minAcceptableFee,
     };
   }
 
   if (destination === 'senior') {
-    if (buyingClub.squad.length >= 25) {
-      return {
-        ok: false,
-        reason: `First-team squad is full at 25 players. Sign ${prospect.name} to your Youth Academy or free a senior slot.`,
-        compensationFee,
-        minAcceptableFee,
-      };
-    }
     const offeredWage = wage ?? getAcademyPromotionWage(buyingClub.tier);
     const currentWages = buyingClub.squad.reduce((acc, p) => acc + p.wage, 0);
     if (currentWages + offeredWage > buyingClub.wageBudget) {
@@ -2496,7 +3515,7 @@ export function evaluatePoachProspect({
   if (offeredFee > buyingClub.transferBudget) {
     return {
       ok: false,
-      reason: `Compensation (£${(offeredFee / 1000000).toFixed(2)}M) exceeds your transfer war chest (£${(buyingClub.transferBudget / 1000000).toFixed(2)}M).`,
+      reason: `Price (£${(offeredFee / 1000000).toFixed(2)}M) exceeds your transfer budget (£${(buyingClub.transferBudget / 1000000).toFixed(2)}M).`,
       compensationFee,
       minAcceptableFee,
     };
@@ -2505,7 +3524,7 @@ export function evaluatePoachProspect({
   if (offeredFee > buyingClub.balance) {
     return {
       ok: false,
-      reason: `Club cash reserves (£${(buyingClub.balance / 1000000).toFixed(2)}M) cannot cover this compensation fee.`,
+      reason: `Club cash reserves (£${(buyingClub.balance / 1000000).toFixed(2)}M) cannot cover this transfer fee.`,
       compensationFee,
       minAcceptableFee,
     };
@@ -2514,7 +3533,7 @@ export function evaluatePoachProspect({
   if (offeredFee < minAcceptableFee) {
     return {
       ok: false,
-      reason: `${sellingClub.name} rejected £${(offeredFee / 1000000).toFixed(2)}M. Youth tribunal valuation requires at least £${(minAcceptableFee / 1000000).toFixed(2)}M.`,
+      reason: `${sellingClub.name} rejected £${(offeredFee / 1000000).toFixed(2)}M. They require at least £${(minAcceptableFee / 1000000).toFixed(2)}M.`,
       compensationFee,
       minAcceptableFee,
     };
@@ -2523,7 +3542,7 @@ export function evaluatePoachProspect({
   if (owner?.wealth === 'frugal' && offeredFee > buyingClub.transferBudget * 0.6) {
     return {
       ok: false,
-      reason: `BOARD VETO: ${owner.name} blocked spending over 60% of the transfer war chest on a single youth compensation fee.`,
+      reason: `BOARD VETO: ${owner.name} blocked spending over 60% of the transfer budget on a single academy signing.`,
       compensationFee,
       minAcceptableFee,
     };
@@ -2545,11 +3564,12 @@ export function poachAcademyProspect({
   owner,
   manager,
   offeredFee,
-  destination,
+  destination = 'academy',
   wage,
   contractYears,
   seasonYear,
   currentWeek,
+  initiatedBy = 'director',
 }: {
   prospect: AcademyPlayer;
   sellingClub: Club;
@@ -2559,11 +3579,12 @@ export function poachAcademyProspect({
   owner?: Owner;
   manager?: Manager;
   offeredFee: number;
-  destination: 'academy' | 'senior';
+  destination?: 'academy' | 'senior';
   wage: number;
   contractYears: number;
   seasonYear: number;
   currentWeek: number;
+  initiatedBy?: 'director' | 'manager';
 }):
   | {
       success: true;
@@ -2584,7 +3605,7 @@ export function poachAcademyProspect({
   });
 
   if (!evaluation.ok) {
-    return { success: false, error: evaluation.reason || 'Unable to complete youth compensation approach.' };
+    return { success: false, error: evaluation.reason || 'Unable to complete academy signing.' };
   }
 
   let transferPlayerForRecord: Player;
@@ -2602,13 +3623,17 @@ export function poachAcademyProspect({
 
     if (c.id === buyingClub.id) {
       if (destination === 'academy') {
-        const scholar: AcademyPlayer = {
-          ...prospect,
-          clubId: buyingClub.id,
-          graduatingSeason: seasonYear,
-        };
-        transferPlayerForRecord = buildPromotedPlayerFromProspect(scholar, buyingClub, 0, 0);
-        resultMsg = `POACH COMPLETED: ${prospect.name} (${prospect.position}, Age ${prospect.age}) joined ${buyingClub.name} Youth Academy for £${(offeredFee / 1000000).toFixed(2)}M compensation.`;
+        const scholar: AcademyPlayer = normalizeAcademyPlayer(
+          {
+            ...prospect,
+            clubId: buyingClub.id,
+            origin: 'poached',
+            graduatingSeason: seasonYear,
+          },
+          buyingClub
+        );
+        transferPlayerForRecord = academyPlayerToPlayer(scholar, buyingClub);
+        resultMsg = `ACADEMY POACH: ${prospect.name} (${prospect.position}, Age ${prospect.age}) signed to ${buyingClub.name} Youth Academy for £${(offeredFee / 1000000).toFixed(2)}M.`;
         return {
           ...c,
           balance: Math.max(0, c.balance - offeredFee),
@@ -2618,7 +3643,7 @@ export function poachAcademyProspect({
       } else {
         const seniorPlayer = buildPromotedPlayerFromProspect(prospect, buyingClub, wage, contractYears);
         transferPlayerForRecord = seniorPlayer;
-        resultMsg = `POACH COMPLETED: ${prospect.name} (${prospect.position}, Age ${prospect.age}) signed a ${contractYears}-year senior contract from ${sellingClub.name} Academy for £${(offeredFee / 1000000).toFixed(2)}M compensation.`;
+        resultMsg = `ACADEMY POACH: ${prospect.name} (${prospect.position}, Age ${prospect.age}) signed a ${contractYears}-year senior contract from ${sellingClub.name} Academy for £${(offeredFee / 1000000).toFixed(2)}M.`;
         const baseUpdated: Club = {
           ...c,
           balance: Math.max(0, c.balance - offeredFee),
@@ -2634,10 +3659,9 @@ export function poachAcademyProspect({
     return c;
   });
 
-  // Fallback assignment in case TS control-flow analysis needs certainty
   const recordPlayer =
     transferPlayerForRecord! ||
-    buildPromotedPlayerFromProspect(prospect, buyingClub, destination === 'senior' ? wage : 0, contractYears);
+    academyPlayerToPlayer(prospect, buyingClub);
 
   const record = createTransferRecord(
     recordPlayer,
@@ -2647,10 +3671,8 @@ export function poachAcademyProspect({
     offeredFee,
     seasonYear,
     currentWeek,
-    'director',
-    destination === 'academy'
-      ? `Youth Academy compensation poach from ${sellingClub.name} (joined Academy)`
-      : `Youth Academy compensation poach from ${sellingClub.name} (Senior Contract)`
+    initiatedBy,
+    `Poached from ${sellingClub.name} Academy`
   );
 
   const updatedDirector: Director = {
@@ -2807,6 +3829,7 @@ export interface RunManagerYouthPromotionResult {
   updatedClub: Club;
   newTransfers: TransferRecord[];
   pressHeadlines: PressHeadline[];
+  reputationGain: number;
 }
 
 export function runManagerYouthPromotion({
@@ -2819,7 +3842,7 @@ export function runManagerYouthPromotion({
   transferHistory,
 }: RunManagerYouthPromotionParams): RunManagerYouthPromotionResult {
   if (club.id !== myClubId) {
-    return { updatedClub: club, newTransfers: [], pressHeadlines: [] };
+    return { updatedClub: club, newTransfers: [], pressHeadlines: [], reputationGain: 0 };
   }
 
   const isPreSeasonReview = currentWeek === 1;
@@ -2845,11 +3868,11 @@ export function runManagerYouthPromotion({
   }
 
   if (delegation.youthPromotion !== 'manager' || !manager || club.managerId !== manager.id) {
-    return { updatedClub: club, newTransfers: [], pressHeadlines: [] };
+    return { updatedClub: club, newTransfers: [], pressHeadlines: [], reputationGain: 0 };
   }
 
   if (initialAcademy.length === 0) {
-    return { updatedClub: club, newTransfers: [], pressHeadlines: [] };
+    return { updatedClub: club, newTransfers: [], pressHeadlines: [], reputationGain: 0 };
   }
 
   const hasShortPosition = (c: Club): boolean => {
@@ -3002,10 +4025,16 @@ export function runManagerYouthPromotion({
     }
   }
 
+  const reputationGain = Math.min(
+    3,
+    newTransfers.reduce((sum, tr) => sum + (tr.overall >= 64 ? 2 : 1), 0)
+  );
+
   return {
     updatedClub: workingClub,
     newTransfers,
     pressHeadlines,
+    reputationGain,
   };
 }
 
@@ -3015,16 +4044,20 @@ export function promoteAcademyPlayer(
   wage: number,
   contractYears: number,
   manager?: Manager,
-  options?: { allowWageBudgetOverageFactor?: number }
+  options?: { allowWageBudgetOverageFactor?: number; unrestricted?: boolean }
 ): { success: true; updatedClub: Club; promotedPlayer: Player } | { success: false; error: string } {
-  if (club.squad.length >= 25) {
-    return { success: false, error: 'First-team squad is at maximum 25-man roster capacity! Release or transfer a senior player first.' };
-  }
+  const unrestricted = Boolean(options?.unrestricted);
 
-  const currentWages = club.squad.reduce((acc, p) => acc + p.wage, 0);
-  const effectiveWageBudget = club.wageBudget * (options?.allowWageBudgetOverageFactor ?? 1);
-  if (currentWages + wage > effectiveWageBudget) {
-    return { success: false, error: `Offered wage (£${(wage / 1000).toFixed(1)}k/wk) exceeds club weekly wage budget headroom!` };
+  if (!unrestricted) {
+    if (club.squad.length >= 25) {
+      return { success: false, error: 'First-team squad is at maximum 25-man roster capacity! Release or transfer a senior player first.' };
+    }
+
+    const currentWages = club.squad.reduce((acc, p) => acc + p.wage, 0);
+    const effectiveWageBudget = club.wageBudget * (options?.allowWageBudgetOverageFactor ?? 1);
+    if (currentWages + wage > effectiveWageBudget) {
+      return { success: false, error: `Offered wage (£${(wage / 1000).toFixed(1)}k/wk) exceeds club weekly wage budget headroom!` };
+    }
   }
 
   const academy = club.academy || [];
@@ -3033,34 +4066,7 @@ export function promoteAcademyPlayer(
     return { success: false, error: 'Academy prospect not found.' };
   }
 
-  const valMultiplier = club.tier === 1 ? 800000 : club.tier === 2 ? 220000 : 60000;
-  const value = Math.max(50000, Math.round(prospect.overall * prospect.overall * valMultiplier * 0.003));
-
-  const startingMomentum: GrowthMomentum = 
-    prospect.momentumTier === 'Generational Prodigy' ? 'breakout' :
-    prospect.momentumTier === 'High Tempo' ? 'rapid' : 'steady';
-
-  const promotedPlayer: Player = {
-    id: `p_promoted_${prospect.id}_${Date.now()}`,
-    name: prospect.name,
-    nationality: prospect.nationality,
-    age: prospect.age,
-    position: prospect.position,
-    roleDetail: prospect.roleDetail,
-    overall: prospect.overall,
-    growthMomentum: startingMomentum,
-    value,
-    wage,
-    contractYears,
-    form: 6.8,
-    happiness: 95,
-    morale: 'ecstatic',
-    goals: 0,
-    assists: 0,
-    appearances: 0,
-    cleanSheets: 0,
-    clubId: club.id,
-  };
+  const promotedPlayer = buildPromotedPlayerFromProspect(prospect, club, wage, contractYears);
 
   const updatedClubBase: Club = {
     ...club,
@@ -3083,6 +4089,113 @@ export function releaseAcademyPlayer(club: Club, academyPlayerId: string): Club 
   return {
     ...club,
     academy: academy.filter(p => p.id !== academyPlayerId),
+  };
+}
+
+/**
+ * Reuses existing transferService getTransferOffers() to fetch real club bids for an academy player.
+ */
+export function getAcademySaleOffers(
+  prospect: AcademyPlayer,
+  sellerClub: Club,
+  allClubs: Club[]
+): GeneratedTransferOffer[] {
+  const playerObj = academyPlayerToPlayer(prospect, sellerClub);
+  return getTransferOffers(playerObj, allClubs, sellerClub.id);
+}
+
+/**
+ * Sells an academy player to another club, reusing standard transfer ledger & club finance settlement.
+ */
+export function sellAcademyPlayer({
+  prospect,
+  sellerClub,
+  buyingClub,
+  clubs,
+  director,
+  fee,
+  wage,
+  seasonYear,
+  currentWeek,
+  initiatedBy = 'director',
+}: {
+  prospect: AcademyPlayer;
+  sellerClub: Club;
+  buyingClub: Club;
+  clubs: Club[];
+  director: Director;
+  fee: number;
+  wage: number;
+  seasonYear: number;
+  currentWeek: number;
+  initiatedBy?: 'director' | 'manager';
+}): {
+  updatedClubs: Club[];
+  updatedDirector: Director;
+  soldPlayer: Player;
+  record: TransferRecord;
+} {
+  if (!(sellerClub.academy || []).some(a => a.id === prospect.id)) {
+    throw new Error(`${prospect.name} is no longer in ${sellerClub.name} Youth Academy.`);
+  }
+  if (buyingClub.squad.length >= 25) {
+    throw new Error(`${buyingClub.name} already has a full 25-man squad.`);
+  }
+
+  const soldPlayer: Player = {
+    ...academyPlayerToPlayer(prospect, sellerClub),
+    clubId: buyingClub.id,
+    wage,
+    contractYears: 3,
+    happiness: 85,
+    morale: 'content',
+  };
+
+  const updatedClubs = clubs.map(c => {
+    if (c.id === sellerClub.id) {
+      return {
+        ...c,
+        academy: (c.academy || []).filter(a => a.id !== prospect.id),
+        transferBudget: c.transferBudget + fee,
+        balance: c.balance + fee,
+      };
+    }
+    if (c.id === buyingClub.id) {
+      const updatedBuyerBase: Club = {
+        ...c,
+        squad: [...c.squad, soldPlayer],
+        transferBudget: Math.max(0, c.transferBudget - fee),
+        balance: Math.max(0, c.balance - fee),
+      };
+      return updatedBuyerBase.lineup
+        ? { ...updatedBuyerBase, lineup: syncLineupAfterSquadChange(updatedBuyerBase) }
+        : updatedBuyerBase;
+    }
+    return c;
+  });
+
+  const updatedDirector: Director = {
+    ...director,
+    netSpend: director.netSpend - fee,
+  };
+
+  const record = createTransferRecord(
+    soldPlayer,
+    'sale',
+    sellerClub.id,
+    buyingClub.id,
+    fee,
+    seasonYear,
+    currentWeek,
+    initiatedBy,
+    `Sold from ${sellerClub.name} Youth Academy`
+  );
+
+  return {
+    updatedClubs,
+    updatedDirector,
+    soldPlayer,
+    record,
   };
 }
 
@@ -3116,7 +4229,7 @@ export function offerPlayerToClubs(
     }
   }
 
-  if (!player || !sellingClub) return [];
+  if (!player || !sellingClub || player.isInjured || player.retiringAtSeasonEnd) return [];
 
   const bids: IncomingBid[] = [];
   const candidateClubs = clubs.filter(c => c.id !== sellingClub!.id);
@@ -3151,10 +4264,11 @@ export function offerPlayerToClubs(
 
     if (!tierFit) continue;
 
-    // 3. Financial affordability
+    // 3. Financial affordability (verify buyer can pay actual offered wage & fee)
+    const wageOffered = Math.round(player.wage * 1.12);
     const currentWages = buyer.squad.reduce((sum, p) => sum + p.wage, 0);
     const wageHeadroom = buyer.wageBudget - currentWages;
-    if (wageHeadroom < player.wage * 0.85) continue;
+    if (wageHeadroom < wageOffered) continue;
 
     // Check if buyer has transfer budget for at least 85% of asking price
     const minOfferBudget = askingPrice * 0.82;

@@ -14,35 +14,45 @@ import {
   Director,
   Owner,
   LeagueTier,
-  MomentumTier,
+  GameMode,
+  GrowthMomentum,
 } from '../types/game';
 import {
   GraduationCap,
   Trash2,
   ArrowUpRight,
   ShieldCheck,
-  Sparkles,
   AlertCircle,
   CheckCircle2,
   Search,
   RotateCcw,
   ArrowUpDown,
   Globe,
+  Coins,
 } from 'lucide-react';
 import { sounds } from '../services/soundEffects';
 import {
+  calculateAcademyPlayerValue,
   calculatePoachCompensation,
   evaluatePoachProspect,
-  evaluateProspect,
   getAcademyPromotionWage,
+  getAcademySaleOffers,
   MAX_USER_ACADEMY_CAPACITY,
+  normalizeAcademyPlayer,
   poachAcademyProspect,
   promoteAcademyPlayer,
   releaseAcademyPlayer,
 } from '../services/simulationEngine';
+import {
+  GeneratedTransferOffer,
+  getTransferWindowLabel,
+  isTransferWindowOpen,
+} from '../services/transferService';
+import { YOUTH_ACADEMY_CONFIG } from '../config/youthAcademyConfig';
 import { Modal } from './ui/Modal';
 
 interface YouthAcademyViewProps {
+  gameMode?: GameMode;
   club: Club;
   allClubs?: Club[];
   manager?: Manager;
@@ -58,10 +68,16 @@ interface YouthAcademyViewProps {
     updatedDirector: Director,
     record: TransferRecord
   ) => void;
+  onSellAcademyPlayer?: (
+    prospect: AcademyPlayer,
+    buyingClub: Club,
+    fee: number,
+    wage: number
+  ) => void;
 }
 
-type AcademyTab = 'mine' | 'rivals';
-type RivalSortField = 'overall' | 'fee' | 'age' | 'momentum';
+type AcademyTab = 'mine' | 'poach';
+type RivalSortField = 'overall' | 'fee' | 'age' | 'growth';
 
 interface RivalProspectRow {
   prospect: AcademyPlayer;
@@ -69,12 +85,50 @@ interface RivalProspectRow {
   compensationFee: number;
 }
 
-const MOMENTUM_WEIGHT: Record<MomentumTier, number> = {
-  'Generational Prodigy': 4,
-  'High Tempo': 3,
-  'Late Surge': 2,
-  'Steady Climber': 1,
+const POSITION_ORDER: Record<PlayerPosition, number> = {
+  GK: 0,
+  DEF: 1,
+  MID: 2,
+  FWD: 3,
 };
+
+const GROWTH_WEIGHT: Record<GrowthMomentum, number> = {
+  breakout: 5,
+  rapid: 4,
+  prime: 3,
+  steady: 2,
+  cooling: 1,
+};
+
+function getGrowthLabel(momentum?: GrowthMomentum): string {
+  switch (momentum) {
+    case 'breakout':
+      return 'Breakout';
+    case 'rapid':
+      return 'Rapid';
+    case 'prime':
+      return 'Prime';
+    case 'cooling':
+      return 'Cooling';
+    default:
+      return 'Steady';
+  }
+}
+
+function getGrowthColorClass(momentum?: GrowthMomentum): string {
+  switch (momentum) {
+    case 'breakout':
+      return 'text-emerald-400';
+    case 'rapid':
+      return 'text-cyan-400';
+    case 'prime':
+      return 'text-amber-400';
+    case 'cooling':
+      return 'text-rose-400';
+    default:
+      return 'text-slate-300';
+  }
+}
 
 function getTierName(tier: LeagueTier): string {
   if (tier === 1) return 'Premier League';
@@ -82,67 +136,87 @@ function getTierName(tier: LeagueTier): string {
   return 'League One';
 }
 
-function getMomentumToneClass(tier: MomentumTier): string {
-  if (tier === 'Generational Prodigy') return 'text-emerald-400';
-  if (tier === 'High Tempo') return 'text-cyan-400';
-  if (tier === 'Late Surge') return 'text-amber-400';
-  return 'text-slate-300';
-}
-
 export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
+  gameMode = 'director',
   club,
   allClubs = [],
   manager,
   director,
   owner,
   delegation,
-  transferHistory,
   seasonYear,
   currentWeek = 1,
   onUpdateClub,
   onCompletePoach,
+  onSellAcademyPlayer,
 }) => {
   const [activeTab, setActiveTab] = useState<AcademyTab>('mine');
   const [selectedPos, setSelectedPos] = useState<PlayerPosition | 'ALL'>('ALL');
   const [selectedProspect, setSelectedProspect] = useState<AcademyPlayer | null>(null);
-  const [promoteWage, setPromoteWage] = useState<number>(2500);
+  const [promoteWage, setPromoteWage] = useState<number>(() => getAcademyPromotionWage(club.tier));
   const [promoteYears, setPromoteYears] = useState<number>(3);
+  const [sellTarget, setSellTarget] = useState<AcademyPlayer | null>(null);
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
-  // Rival Academies Scouting Filters & Poach Modal State
+  // Poach View Filters & Negotiation Modal State
   const [rivalSearch, setRivalSearch] = useState('');
   const [rivalTier, setRivalTier] = useState<LeagueTier | 'ALL'>('ALL');
   const [rivalPos, setRivalPos] = useState<PlayerPosition | 'ALL'>('ALL');
-  const [rivalMomentum, setRivalMomentum] = useState<MomentumTier | 'ALL'>('ALL');
+  const [rivalGrowth, setRivalGrowth] = useState<GrowthMomentum | 'ALL'>('ALL');
   const [rivalClubId, setRivalClubId] = useState<string>('ALL');
   const [rivalSort, setRivalSort] = useState<RivalSortField>('overall');
   const [rivalSortDir, setRivalSortDir] = useState<'asc' | 'desc'>('desc');
 
   const [poachTarget, setPoachTarget] = useState<RivalProspectRow | null>(null);
   const [poachFee, setPoachFee] = useState<number>(500000);
-  const [poachDestination, setPoachDestination] = useState<'academy' | 'senior'>('academy');
-  const [poachWage, setPoachWage] = useState<number>(2500);
-  const [poachYears, setPoachYears] = useState<number>(4);
   const [poachError, setPoachError] = useState<string | null>(null);
 
-  const academyList = club.academy || [];
+  const isManagerMode = gameMode === 'manager';
+  const windowOpen = isTransferWindowOpen(currentWeek);
+  const windowLabel = getTransferWindowLabel(currentWeek);
 
-  const filteredProspects = academyList.filter(p => {
-    if (selectedPos === 'ALL') return true;
-    return p.position === selectedPos;
-  });
+  const academyList = useMemo(
+    () =>
+      (club.academy || [])
+        .map(p => normalizeAcademyPlayer(p, club))
+        .sort(
+          (a, b) =>
+            POSITION_ORDER[a.position] - POSITION_ORDER[b.position] ||
+            b.overall - a.overall ||
+            a.age - b.age
+        ),
+    [club]
+  );
 
-  const currentSquadWages = club.squad.reduce((acc, p) => acc + p.wage, 0);
-  const wageSpace = Math.max(0, club.wageBudget - currentSquadWages);
-  const squadSlotsLeft = Math.max(0, 25 - club.squad.length);
+  const isAcademyFull = academyList.length >= MAX_USER_ACADEMY_CAPACITY;
+  const freeSpots = Math.max(0, MAX_USER_ACADEMY_CAPACITY - academyList.length);
+  const poachedCount = academyList.filter(p => p.origin === 'poached').length;
+  const poachSpotsFree = Math.max(0, YOUTH_ACADEMY_CONFIG.freePoachSlots - poachedCount);
 
-  const topProspect = [...academyList].sort((a, b) => {
-    const diff = MOMENTUM_WEIGHT[b.momentumTier] - MOMENTUM_WEIGHT[a.momentumTier];
-    if (diff !== 0) return diff;
-    return b.overall - a.overall;
-  })[0];
+  const filteredProspects = useMemo(
+    () =>
+      academyList.filter(p => {
+        if (selectedPos === 'ALL') return true;
+        return p.position === selectedPos;
+      }),
+    [academyList, selectedPos]
+  );
 
-  // Build Rival Academies Directory
+  const groupedByPosition = useMemo(() => {
+    const groups: { pos: PlayerPosition; label: string; players: AcademyPlayer[] }[] = [
+      { pos: 'GK', label: 'Goalkeepers', players: [] },
+      { pos: 'DEF', label: 'Defenders', players: [] },
+      { pos: 'MID', label: 'Midfielders', players: [] },
+      { pos: 'FWD', label: 'Forwards', players: [] },
+    ];
+    const map = new Map<PlayerPosition, AcademyPlayer[]>(groups.map(g => [g.pos, g.players]));
+    filteredProspects.forEach(p => {
+      map.get(p.position)?.push(p);
+    });
+    return groups.filter(g => g.players.length > 0);
+  }, [filteredProspects]);
+
+  // Rival Academies Directory
   const rivalClubs = useMemo(
     () =>
       allClubs
@@ -154,7 +228,8 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
   const allRivalProspects = useMemo<RivalProspectRow[]>(() => {
     const rows: RivalProspectRow[] = [];
     for (const c of rivalClubs) {
-      for (const prospect of c.academy || []) {
+      for (const rawProspect of c.academy || []) {
+        const prospect = normalizeAcademyPlayer(rawProspect, c);
         rows.push({
           prospect,
           sellingClub: c,
@@ -171,9 +246,9 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
       if (rivalTier !== 'ALL' && sellingClub.tier !== rivalTier) return false;
       if (rivalClubId !== 'ALL' && sellingClub.id !== rivalClubId) return false;
       if (rivalPos !== 'ALL' && prospect.position !== rivalPos) return false;
-      if (rivalMomentum !== 'ALL' && prospect.momentumTier !== rivalMomentum) return false;
+      if (rivalGrowth !== 'ALL' && (prospect.growthMomentum ?? 'steady') !== rivalGrowth) return false;
       if (q) {
-        const hay = `${prospect.name} ${sellingClub.name} ${sellingClub.shortName} ${prospect.roleDetail} ${prospect.trait}`.toLowerCase();
+        const hay = `${prospect.name} ${sellingClub.name} ${sellingClub.shortName} ${prospect.roleDetail} ${prospect.nationality}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
@@ -184,21 +259,25 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
       if (rivalSort === 'overall') cmp = a.prospect.overall - b.prospect.overall;
       else if (rivalSort === 'fee') cmp = a.compensationFee - b.compensationFee;
       else if (rivalSort === 'age') cmp = a.prospect.age - b.prospect.age;
-      else cmp = MOMENTUM_WEIGHT[a.prospect.momentumTier] - MOMENTUM_WEIGHT[b.prospect.momentumTier];
+      else {
+        cmp =
+          GROWTH_WEIGHT[a.prospect.growthMomentum ?? 'steady'] -
+          GROWTH_WEIGHT[b.prospect.growthMomentum ?? 'steady'];
+      }
 
       if (cmp === 0) cmp = a.prospect.overall - b.prospect.overall;
       return rivalSortDir === 'desc' ? -cmp : cmp;
     });
 
     return filtered;
-  }, [allRivalProspects, rivalSearch, rivalTier, rivalClubId, rivalPos, rivalMomentum, rivalSort, rivalSortDir]);
+  }, [allRivalProspects, rivalSearch, rivalTier, rivalClubId, rivalPos, rivalGrowth, rivalSort, rivalSortDir]);
 
   const hasActiveRivalFilters =
     rivalSearch.trim() !== '' ||
     rivalTier !== 'ALL' ||
     rivalClubId !== 'ALL' ||
     rivalPos !== 'ALL' ||
-    rivalMomentum !== 'ALL';
+    rivalGrowth !== 'ALL';
 
   const resetRivalFilters = () => {
     sounds.playClick();
@@ -206,7 +285,7 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
     setRivalTier('ALL');
     setRivalClubId('ALL');
     setRivalPos('ALL');
-    setRivalMomentum('ALL');
+    setRivalGrowth('ALL');
   };
 
   const handleOpenPromote = (prospect: AcademyPlayer) => {
@@ -219,7 +298,14 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
   const handleConfirmPromote = () => {
     if (!selectedProspect) return;
 
-    const result = promoteAcademyPlayer(club, selectedProspect.id, promoteWage, promoteYears, manager);
+    const result = promoteAcademyPlayer(
+      club,
+      selectedProspect.id,
+      promoteWage,
+      promoteYears,
+      manager,
+      { unrestricted: true }
+    );
 
     if (!result.success) {
       sounds.playCrisis();
@@ -230,7 +316,7 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
     sounds.playSigningStamp();
     onUpdateClub(result.updatedClub);
     setFeedback({
-      message: `PROMOTION RATIFIED: ${selectedProspect.name} (${selectedProspect.position}, Age ${selectedProspect.age}) has signed a ${promoteYears}-year professional contract at £${(promoteWage / 1000).toFixed(1)}k/week!`,
+      message: `PROMOTED: ${selectedProspect.name} (${selectedProspect.position}, Age ${selectedProspect.age}) joined the first team on a ${promoteYears}-year deal at £${(promoteWage / 1000).toFixed(1)}k/wk.`,
       type: 'success',
     });
     setSelectedProspect(null);
@@ -241,23 +327,44 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
     const updatedClub = releaseAcademyPlayer(club, prospect.id);
     onUpdateClub(updatedClub);
     setFeedback({
-      message: `RELEASED: ${prospect.name} has been let go from the academy setup.`,
+      message: `RELEASED: ${prospect.name} has been released from the academy.`,
       type: 'success',
     });
     if (selectedProspect?.id === prospect.id) setSelectedProspect(null);
+    if (sellTarget?.id === prospect.id) setSellTarget(null);
+  };
+
+  const saleOffers = useMemo<GeneratedTransferOffer[]>(() => {
+    if (!sellTarget || !windowOpen) return [];
+    return getAcademySaleOffers(sellTarget, club, allClubs);
+  }, [sellTarget, windowOpen, club, allClubs]);
+
+  const handleOpenSell = (prospect: AcademyPlayer) => {
+    sounds.playClick();
+    setSellTarget(prospect);
+  };
+
+  const handleAcceptSaleOffer = (offer: GeneratedTransferOffer) => {
+    if (!sellTarget || !onSellAcademyPlayer) return;
+    onSellAcademyPlayer(sellTarget, offer.club, offer.fee, offer.wage);
+    setFeedback({
+      message: `SOLD: ${sellTarget.name} sold to ${offer.club.name} for £${(offer.fee / 1000000).toFixed(2)}M.`,
+      type: 'success',
+    });
+    setSellTarget(null);
   };
 
   const handleOpenPoach = (row: RivalProspectRow) => {
     sounds.playClick();
+    if (isAcademyFull) {
+      setFeedback({
+        message: `Your Youth Academy is full (${MAX_USER_ACADEMY_CAPACITY}/${MAX_USER_ACADEMY_CAPACITY}). Promote, sell, or release a player first.`,
+        type: 'error',
+      });
+      return;
+    }
     setPoachTarget(row);
     setPoachFee(row.compensationFee);
-    setPoachDestination(
-      row.prospect.age >= 17 && academyList.length >= MAX_USER_ACADEMY_CAPACITY
-        ? 'senior'
-        : 'academy'
-    );
-    setPoachWage(getAcademyPromotionWage(club.tier));
-    setPoachYears(4);
     setPoachError(null);
   };
 
@@ -269,10 +376,9 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
       buyingClub: club,
       owner,
       offeredFee: poachFee,
-      destination: poachDestination,
-      wage: poachWage,
+      destination: 'academy',
     });
-  }, [poachTarget, club, owner, poachFee, poachDestination, poachWage]);
+  }, [poachTarget, club, owner, poachFee]);
 
   const handleConfirmPoach = () => {
     if (!poachTarget || !director || !onCompletePoach) return;
@@ -286,11 +392,12 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
       owner,
       manager,
       offeredFee: poachFee,
-      destination: poachDestination,
-      wage: poachWage,
-      contractYears: poachYears,
+      destination: 'academy',
+      wage: getAcademyPromotionWage(club.tier),
+      contractYears: 3,
       seasonYear,
       currentWeek,
+      initiatedBy: isManagerMode ? 'manager' : 'director',
     });
 
     if (!result.success) {
@@ -317,46 +424,46 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
           <div>
             <div className="flex items-center gap-2 text-xs font-semibold text-amber-400 mb-1">
               <GraduationCap className="w-4 h-4 shrink-0" />
-              <span>Youth Development & Pyramid Scouting</span>
+              <span>Youth Development &amp; Academy Scouting</span>
             </div>
             <h1 className="text-2xl lg:text-3xl font-extrabold text-white tracking-tight">
-              {club.name} Youth Academy
+              {club.name} Academy
             </h1>
             <p className="text-slate-400 text-xs mt-1 max-w-[75ch]">
-              Develop homegrown scholars (ages 15–18), promote standout talent to the senior roster, or scout rival academies across all three divisions to poach emerging prodigies.
+              7 seasonal spots (1 GK, 2 DEF, 2 MID, 2 FWD) plus 3 open spots for poaching from rival clubs. Promote freely to the first team, sell, or release anytime.
             </p>
-            {delegation?.youthPromotion === 'manager' && (
+            {!isManagerMode && delegation?.youthPromotion === 'manager' && (
               <p className="text-emerald-400 text-xs font-medium mt-1.5 flex items-center gap-1.5">
                 <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
-                <span>Head Coach will promote ready prospects automatically</span>
+                <span>Head Coach may also promote ready prospects automatically</span>
               </p>
             )}
           </div>
 
           {/* Quick Metrics */}
-          <div className="grid grid-cols-3 gap-2.5 shrink-0">
-            <div className="px-3.5 py-2 bg-slate-900 border border-white/10 rounded-xl text-right">
-              <span className="text-xs text-slate-400 block">Academy</span>
-              <span className="text-base font-bold font-mono text-white tabular-nums">
+          <div className="grid grid-cols-3 gap-2 sm:gap-2.5 shrink-0">
+            <div className="px-2.5 sm:px-3.5 py-2 bg-slate-900 border border-white/10 rounded-xl text-right min-w-0">
+              <span className="text-xs text-slate-400 block truncate">Academy Spots</span>
+              <span className={`text-sm sm:text-base font-bold font-mono tabular-nums ${isAcademyFull ? 'text-rose-400' : 'text-white'}`}>
                 {academyList.length} / {MAX_USER_ACADEMY_CAPACITY}
               </span>
             </div>
-            <div className="px-3.5 py-2 bg-slate-900 border border-white/10 rounded-xl text-right">
-              <span className="text-xs text-slate-400 block">Senior Slots</span>
-              <span className={`text-base font-bold font-mono tabular-nums ${squadSlotsLeft === 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
-                {club.squad.length} / 25
+            <div className="px-2.5 sm:px-3.5 py-2 bg-slate-900 border border-white/10 rounded-xl text-right min-w-0">
+              <span className="text-xs text-slate-400 block truncate">Free Spots</span>
+              <span className="text-sm sm:text-base font-bold font-mono text-emerald-400 tabular-nums">
+                {freeSpots} ({poachSpotsFree} poach)
               </span>
             </div>
-            <div className="px-3.5 py-2 bg-slate-900 border border-white/10 rounded-xl text-right">
-              <span className="text-xs text-slate-400 block">War Chest</span>
-              <span className="text-base font-bold font-mono text-amber-400 tabular-nums">
+            <div className="px-2.5 sm:px-3.5 py-2 bg-slate-900 border border-white/10 rounded-xl text-right min-w-0">
+              <span className="text-xs text-slate-400 block truncate">Transfer Budget</span>
+              <span className="text-sm sm:text-base font-bold font-mono text-amber-400 tabular-nums">
                 £{(club.transferBudget / 1000000).toFixed(1)}M
               </span>
             </div>
           </div>
         </div>
 
-        {/* Workspace Mode Switch & Spotlight */}
+        {/* Workspace Tab Switch */}
         <div className="mt-5 pt-4 border-t border-white/10 flex flex-col md:flex-row md:items-center justify-between gap-3">
           <div className="inline-flex items-center gap-1 p-1 bg-slate-900 border border-white/10 rounded-xl w-full sm:w-auto">
             <button
@@ -365,53 +472,37 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
                 sounds.playClick();
                 setActiveTab('mine');
               }}
-              className={`flex-1 sm:flex-initial min-h-11 lg:min-h-0 px-4 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer whitespace-nowrap flex items-center justify-center gap-2 ${
+              className={`flex-1 sm:flex-initial min-h-11 lg:min-h-0 px-3 sm:px-4 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer whitespace-nowrap flex items-center justify-center gap-1.5 sm:gap-2 ${
                 activeTab === 'mine'
                   ? 'bg-amber-400 text-slate-950 shadow-sm'
                   : 'text-slate-400 hover:text-white hover:bg-white/5'
               }`}
             >
               <GraduationCap className="w-3.5 h-3.5 shrink-0" />
-              <span>My Academy ({academyList.length})</span>
+              <span>Academy ({academyList.length}/{MAX_USER_ACADEMY_CAPACITY})</span>
             </button>
             <button
               type="button"
               onClick={() => {
                 sounds.playClick();
-                setActiveTab('rivals');
+                setActiveTab('poach');
               }}
-              className={`flex-1 sm:flex-initial min-h-11 lg:min-h-0 px-4 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer whitespace-nowrap flex items-center justify-center gap-2 ${
-                activeTab === 'rivals'
+              className={`flex-1 sm:flex-initial min-h-11 lg:min-h-0 px-3 sm:px-4 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer whitespace-nowrap flex items-center justify-center gap-1.5 sm:gap-2 ${
+                activeTab === 'poach'
                   ? 'bg-amber-400 text-slate-950 shadow-sm'
                   : 'text-slate-400 hover:text-white hover:bg-white/5'
               }`}
             >
               <Globe className="w-3.5 h-3.5 shrink-0" />
-              <span>Rival Academies ({allRivalProspects.length})</span>
+              <span>Poach ({allRivalProspects.length})</span>
             </button>
           </div>
 
-          {topProspect && activeTab === 'mine' && (
-            <div className="flex flex-wrap items-center gap-2 text-xs">
-              <span className="text-amber-400 font-semibold flex items-center gap-1.5">
-                <Sparkles className="w-3.5 h-3.5 shrink-0" />
-                <span>Top Scholar:</span>
-              </span>
-              <span className="font-bold text-white">{topProspect.name}</span>
-              <span className="text-slate-500" aria-hidden="true">·</span>
-              <span className="text-slate-300 font-mono">{topProspect.position}</span>
-              <span className="text-slate-500" aria-hidden="true">·</span>
-              <span className={`font-mono font-bold ${getMomentumToneClass(topProspect.momentumTier)}`}>
-                {topProspect.momentumTier}
-              </span>
-            </div>
-          )}
-
-          {activeTab === 'rivals' && (
-            <div className="text-xs text-slate-400 font-mono tabular-nums">
-              Scouting {rivalClubs.length} Rival Academies · Annual Intake Wk 46
-            </div>
-          )}
+          <div className="text-xs text-slate-400 font-mono tabular-nums">
+            {activeTab === 'mine'
+              ? `Season ${seasonYear}/${seasonYear + 1} · First Team ${club.squad.length} Players`
+              : `${rivalClubs.length} Rival Academies · ${freeSpots} Free Academy Spot${freeSpots === 1 ? '' : 's'}`}
+          </div>
         </div>
       </div>
 
@@ -443,7 +534,7 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
         </div>
       )}
 
-      {/* TAB 1: MY ACADEMY */}
+      {/* TAB 1: ACADEMY SQUAD BY POSITION */}
       {activeTab === 'mine' && (
         <>
           <div className="flex items-center justify-between gap-4 flex-wrap">
@@ -463,33 +554,31 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
                   }`}
                 >
                   {pos === 'ALL'
-                    ? 'All Academy'
+                    ? 'All Positions'
                     : pos === 'GK'
-                      ? 'Goalkeepers'
+                      ? 'GK'
                       : pos === 'DEF'
-                        ? 'Defenders'
+                        ? 'DEF'
                         : pos === 'MID'
-                          ? 'Midfielders'
-                          : 'Forwards'}
+                          ? 'MID'
+                          : 'FWD'}
                 </button>
               ))}
             </div>
 
             <div className="text-xs text-slate-400 flex items-center gap-2 font-mono tabular-nums">
-              <span>Intake {seasonYear}/{seasonYear + 1}</span>
-              <span className="text-slate-600" aria-hidden="true">·</span>
-              <span>Wage Room £{(wageSpace / 1000).toFixed(0)}k/wk</span>
+              <span>{windowOpen ? 'Transfer Window Open' : `Window Closed (${windowLabel})`}</span>
             </div>
           </div>
 
           {filteredProspects.length === 0 ? (
-            <div className="bg-[#111827] border border-white/10 rounded-2xl p-12 text-center space-y-3">
+            <div className="bg-[#111827] border border-white/10 rounded-2xl p-10 text-center space-y-3">
               <GraduationCap className="w-12 h-12 text-slate-600 mx-auto" />
-              <h3 className="text-base font-bold text-white">No Academy Prospects In This Position</h3>
+              <h3 className="text-base font-bold text-white">No Academy Players In This Position</h3>
               <p className="text-xs text-slate-400 max-w-md mx-auto">
                 {selectedPos === 'ALL'
-                  ? 'All prospects from this cohort have been promoted or released. Scout Rival Academies or wait for the next annual intake.'
-                  : `There are currently no ${selectedPos} prospects in your academy.`}
+                  ? 'Your academy currently has open spots. Poach players from rival academies or wait for next season’s intake.'
+                  : `There are currently no ${selectedPos} players in your academy.`}
               </p>
               <div className="flex items-center justify-center gap-2 pt-1">
                 {selectedPos !== 'ALL' && (
@@ -503,127 +592,164 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
                 )}
                 <button
                   type="button"
-                  onClick={() => setActiveTab('rivals')}
+                  onClick={() => setActiveTab('poach')}
                   className="min-h-11 lg:min-h-0 px-4 py-2 text-xs font-bold rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 cursor-pointer"
                 >
-                  Scout Rival Academies
+                  Open Poach View
                 </button>
               </div>
             </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
-              {filteredProspects.map(prospect => {
-                const evalResult = evaluateProspect(prospect, club, manager, {
-                  transferHistory,
-                  seasonYear,
-                });
-                const statusLabel = evalResult.promote
-                  ? { label: 'Ready for promotion', className: 'text-emerald-400' }
-                  : evalResult.reason.startsWith('age ')
-                    ? { label: 'Too young', className: 'text-slate-400' }
-                    : evalResult.reason === 'below threshold'
-                      ? { label: 'Developing', className: 'text-slate-400' }
-                      : { label: `Blocked: ${evalResult.reason}`, className: 'text-amber-300' };
+            <div className="space-y-6">
+              {groupedByPosition.map(group => (
+                <section key={group.pos} className="space-y-3">
+                  <div className="flex items-center justify-between border-b border-white/10 pb-2">
+                    <div className="flex items-center gap-2">
+                      <span className="px-2 py-0.5 rounded bg-slate-800 border border-white/10 font-mono text-xs font-bold text-amber-400">
+                        {group.pos}
+                      </span>
+                      <h2 className="text-sm font-bold text-white uppercase tracking-wider">
+                        {group.label}
+                      </h2>
+                    </div>
+                    <span className="text-xs font-mono text-slate-400 tabular-nums">
+                      {group.players.length} player{group.players.length === 1 ? '' : 's'}
+                    </span>
+                  </div>
 
-                return (
-                  <div
-                    key={prospect.id}
-                    className="bg-[#111827] border border-white/10 hover:border-amber-400/40 rounded-xl p-4 sm:p-5 transition-all flex flex-col justify-between space-y-4 group"
-                  >
-                    <div>
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <h3 className="text-base font-bold text-white group-hover:text-amber-400 transition-colors truncate">
-                            {prospect.name}
-                          </h3>
-                          <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-400 mt-0.5">
-                            <span className="font-semibold text-slate-200 font-mono">{prospect.position}</span>
-                            <span aria-hidden="true">·</span>
-                            <span className="font-mono tabular-nums">{prospect.age} yrs</span>
-                            <span aria-hidden="true">·</span>
-                            <span>{prospect.nationality}</span>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3.5">
+                    {group.players.map(prospect => {
+                      const marketValue =
+                        prospect.value ?? calculateAcademyPlayerValue(prospect.overall, club.tier);
+                      return (
+                        <div
+                          key={prospect.id}
+                          className="bg-[#111827] border border-white/10 hover:border-amber-400/40 rounded-xl p-4 transition-all flex flex-col justify-between space-y-3.5"
+                        >
+                          <div>
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-1.5">
+                                  <h3 className="text-base font-bold text-white truncate">
+                                    {prospect.name}
+                                  </h3>
+                                  {prospect.origin === 'poached' && (
+                                    <span className="px-1.5 py-0.5 rounded bg-sky-500/15 border border-sky-400/30 text-[10px] font-bold uppercase text-sky-300 shrink-0">
+                                      Poached
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-400 mt-0.5">
+                                  <span className="font-semibold text-slate-200 font-mono">
+                                    {prospect.position}
+                                  </span>
+                                  <span aria-hidden="true">·</span>
+                                  <span className="font-mono tabular-nums">Age {prospect.age}</span>
+                                  <span aria-hidden="true">·</span>
+                                  <span className="truncate">{prospect.nationality}</span>
+                                </div>
+                              </div>
+                              <div className="text-right shrink-0">
+                                <span className="text-[10px] font-mono uppercase text-slate-400 block">
+                                  OVR
+                                </span>
+                                <span className="text-lg font-extrabold font-mono text-white tabular-nums leading-none">
+                                  {prospect.overall}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="mt-3 pt-2.5 border-t border-white/10 grid grid-cols-2 gap-2 text-xs">
+                              <div>
+                                <span className="text-slate-400 block text-[11px]">Growth</span>
+                                <span className={`font-bold ${getGrowthColorClass(prospect.growthMomentum)}`}>
+                                  {getGrowthLabel(prospect.growthMomentum)}
+                                </span>
+                              </div>
+                              <div className="text-right font-mono tabular-nums">
+                                <span className="text-slate-400 block text-[11px] font-sans">Value</span>
+                                <span className="text-amber-300 font-bold">
+                                  £{(marketValue / 1000000).toFixed(2)}M
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="mt-2.5 w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                              <div
+                                className="h-full bg-gradient-to-r from-amber-400 to-emerald-400 rounded-full transition-all"
+                                style={{ width: `${(prospect.overall / 99) * 100}%` }}
+                              />
+                            </div>
+                          </div>
+
+                          <div className="pt-3 border-t border-white/10 flex flex-wrap items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handleOpenPromote(prospect)}
+                              className="flex-1 min-h-11 lg:min-h-0 px-2.5 py-1.5 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-bold text-xs rounded-lg shadow-sm flex items-center justify-center gap-1 transition-all cursor-pointer active:scale-95 whitespace-nowrap"
+                            >
+                              <ArrowUpRight className="w-3.5 h-3.5 shrink-0" />
+                              <span>Promote</span>
+                            </button>
+
+                            {onSellAcademyPlayer && (
+                              <button
+                                type="button"
+                                onClick={() => handleOpenSell(prospect)}
+                                className="min-h-11 lg:min-h-0 px-2.5 py-1.5 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 font-bold text-xs rounded-lg flex items-center justify-center gap-1 transition-colors cursor-pointer"
+                              >
+                                <Coins className="w-3.5 h-3.5 shrink-0" />
+                                <span>Sell</span>
+                              </button>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() => handleRelease(prospect)}
+                              title="Release academy player"
+                              className="min-h-11 lg:min-h-0 px-2.5 py-1.5 text-xs text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 border border-white/10 rounded-lg transition-all active:scale-95 flex items-center justify-center gap-1 cursor-pointer font-medium"
+                            >
+                              <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                              <span>Release</span>
+                            </button>
                           </div>
                         </div>
-                        <span className="text-lg font-extrabold font-mono text-white tabular-nums shrink-0">
-                          {prospect.overall}
-                        </span>
-                      </div>
-
-                      <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
-                        <span className="text-slate-300 truncate">{prospect.roleDetail}</span>
-                        <span className={`font-semibold ${statusLabel.className}`}>
-                          {statusLabel.label}
-                        </span>
-                      </div>
-
-                      <div className="mt-3 pt-3 border-t border-white/10 space-y-2">
-                        <div className="flex items-center justify-between text-xs font-mono">
-                          <span className="text-amber-400 font-medium">{prospect.trait}</span>
-                          <span className={`font-bold ${getMomentumToneClass(prospect.momentumTier)}`}>
-                            {prospect.momentumTier}
-                          </span>
-                        </div>
-
-                        <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-gradient-to-r from-amber-400 to-emerald-400 rounded-full transition-all"
-                            style={{ width: `${(prospect.overall / 99) * 100}%` }}
-                          />
-                        </div>
-                      </div>
-
-                      <p className="mt-3 text-xs text-slate-400 leading-relaxed italic border-t border-white/5 pt-2">
-                        "{prospect.scoutReport}"
-                      </p>
-                    </div>
-
-                    <div className="pt-3 border-t border-white/10 flex flex-wrap items-center justify-between gap-2">
-                      <button
-                        type="button"
-                        onClick={() => handleRelease(prospect)}
-                        title="Let go of academy player"
-                        className="px-2.5 py-1.5 min-h-11 lg:min-h-0 text-xs text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-all active:scale-95 flex items-center gap-1 cursor-pointer font-medium"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        <span>Release</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => handleOpenPromote(prospect)}
-                        className="flex-1 sm:flex-initial justify-center px-3.5 py-1.5 min-h-11 lg:min-h-0 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-bold text-xs rounded-lg shadow-sm flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 whitespace-nowrap"
-                      >
-                        <ArrowUpRight className="w-3.5 h-3.5" />
-                        <span>Promote to Senior</span>
-                      </button>
-                    </div>
+                      );
+                    })}
                   </div>
-                );
-              })}
+                </section>
+              ))}
             </div>
           )}
         </>
       )}
 
-      {/* TAB 2: RIVAL ACADEMIES SCOUTING & POACHING */}
-      {activeTab === 'rivals' && (
+      {/* TAB 2: POACH RIVAL ACADEMY PLAYERS */}
+      {activeTab === 'poach' && (
         <div className="space-y-4">
+          {isAcademyFull && (
+            <div className="p-4 bg-rose-950/40 border border-rose-500/40 rounded-xl text-xs text-rose-200 flex items-center gap-2.5">
+              <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+              <span>
+                Your Youth Academy is at maximum capacity ({MAX_USER_ACADEMY_CAPACITY}/{MAX_USER_ACADEMY_CAPACITY}). Promote, sell, or release a player before poaching another youngster.
+              </span>
+            </div>
+          )}
+
           {/* Search & Filters Toolbar */}
           <div className="bg-[#111827] border border-white/10 rounded-2xl p-4 space-y-3">
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-2.5">
-              {/* Search */}
               <div className="relative lg:col-span-2">
                 <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                 <input
                   type="search"
                   value={rivalSearch}
                   onChange={e => setRivalSearch(e.target.value)}
-                  placeholder="Search prospect, club, trait..."
+                  placeholder="Search player, club, nationality..."
                   className="w-full min-h-11 lg:min-h-9 pl-9 pr-3 py-1.5 bg-slate-900 border border-white/10 rounded-lg text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-amber-400"
                 />
               </div>
 
-              {/* Tier Filter */}
               <select
                 aria-label="Filter by division"
                 value={rivalTier}
@@ -640,7 +766,6 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
                 <option value="3">League One</option>
               </select>
 
-              {/* Club Filter */}
               <select
                 aria-label="Filter by rival club"
                 value={rivalClubId}
@@ -657,21 +782,19 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
                   ))}
               </select>
 
-              {/* Momentum Filter */}
               <select
-                aria-label="Filter by momentum"
-                value={rivalMomentum}
-                onChange={e => setRivalMomentum(e.target.value as MomentumTier | 'ALL')}
+                aria-label="Filter by growth"
+                value={rivalGrowth}
+                onChange={e => setRivalGrowth(e.target.value as GrowthMomentum | 'ALL')}
                 className="min-h-11 lg:min-h-9 px-3 py-1.5 bg-slate-900 border border-white/10 rounded-lg text-xs text-slate-200 focus:outline-none focus:border-amber-400"
               >
-                <option value="ALL">All Momentum Tiers</option>
-                <option value="Generational Prodigy">Generational Prodigy</option>
-                <option value="High Tempo">High Tempo</option>
-                <option value="Late Surge">Late Surge</option>
-                <option value="Steady Climber">Steady Climber</option>
+                <option value="ALL">All Growth Rates</option>
+                <option value="breakout">Breakout</option>
+                <option value="rapid">Rapid</option>
+                <option value="steady">Steady</option>
+                <option value="cooling">Cooling</option>
               </select>
 
-              {/* Sort Selector */}
               <div className="flex items-center gap-1.5">
                 <select
                   aria-label="Sort prospects"
@@ -679,10 +802,10 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
                   onChange={e => setRivalSort(e.target.value as RivalSortField)}
                   className="flex-1 min-h-11 lg:min-h-9 px-3 py-1.5 bg-slate-900 border border-white/10 rounded-lg text-xs text-slate-200 focus:outline-none focus:border-amber-400"
                 >
-                  <option value="overall">Sort: Overall</option>
-                  <option value="fee">Sort: Compensation</option>
+                  <option value="overall">Sort: Rating</option>
+                  <option value="fee">Sort: Price</option>
                   <option value="age">Sort: Age</option>
-                  <option value="momentum">Sort: Momentum</option>
+                  <option value="growth">Sort: Growth</option>
                 </select>
                 <button
                   type="button"
@@ -705,7 +828,7 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
                       sounds.playClick();
                       setRivalPos(pos);
                     }}
-                    className={`px-3 py-1.5 min-h-10 lg:min-h-0 text-xs font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap ${
+                    className={`px-3 py-1.5 min-h-11 lg:min-h-0 text-xs font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap ${
                       rivalPos === pos
                         ? 'bg-amber-400 text-slate-950'
                         : 'text-slate-400 hover:text-white hover:bg-white/5'
@@ -717,7 +840,7 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
               </div>
 
               <div className="flex items-center gap-3 text-xs text-slate-400 font-mono tabular-nums">
-                <span>{filteredRivals.length} prospects found</span>
+                <span>{filteredRivals.length} players listed</span>
                 {hasActiveRivalFilters && (
                   <button
                     type="button"
@@ -735,9 +858,9 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
           {filteredRivals.length === 0 ? (
             <div className="bg-[#111827] border border-white/10 rounded-2xl p-10 text-center space-y-3">
               <Globe className="w-10 h-10 text-slate-600 mx-auto" />
-              <h3 className="text-base font-bold text-white">No Matching Rival Academy Prospects</h3>
+              <h3 className="text-base font-bold text-white">No Matching Academy Players</h3>
               <p className="text-xs text-slate-400 max-w-md mx-auto">
-                Adjust your division, club, position, or search filters to view emerging talent across the league.
+                Adjust your division, club, position, or search filters to browse other clubs&apos; academies.
               </p>
               {hasActiveRivalFilters && (
                 <button
@@ -751,32 +874,30 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
             </div>
           ) : (
             <>
-              {/* Desktop High-Density Scouting Table */}
+              {/* Desktop Table */}
               <div className="hidden lg:block bg-[#111827] border border-white/10 rounded-2xl overflow-hidden">
                 <div className="overflow-x-auto">
                   <table className="w-full text-left border-collapse">
                     <thead>
                       <tr className="border-b border-white/10 bg-slate-900/70 text-xs text-slate-400 font-semibold">
-                        <th className="py-3 px-4">Prospect</th>
-                        <th className="py-3 px-3">Club & Division</th>
+                        <th className="py-3 px-4">Player</th>
+                        <th className="py-3 px-3">Club &amp; Division</th>
                         <th className="py-3 px-3">Pos</th>
                         <th className="py-3 px-3 text-right">Age</th>
                         <th className="py-3 px-3 text-right">OVR</th>
-                        <th className="py-3 px-3">Momentum & Trait</th>
-                        <th className="py-3 px-3 text-right">Compensation</th>
+                        <th className="py-3 px-3">Growth</th>
+                        <th className="py-3 px-3 text-right">Price</th>
                         <th className="py-3 px-4 text-right">Action</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-white/5 text-xs">
-                      {filteredRivals.slice(0, 80).map(({ prospect, sellingClub, compensationFee }) => {
+                      {filteredRivals.slice(0, 100).map(({ prospect, sellingClub, compensationFee }) => {
                         const canAfford = club.transferBudget >= compensationFee && club.balance >= compensationFee;
                         return (
                           <tr key={prospect.id} className="hover:bg-white/[0.03] transition-colors">
                             <td className="py-2.5 px-4">
                               <div className="font-bold text-white">{prospect.name}</div>
-                              <div className="text-slate-400">
-                                {prospect.roleDetail} · {prospect.nationality}
-                              </div>
+                              <div className="text-slate-400">{prospect.nationality}</div>
                             </td>
                             <td className="py-2.5 px-3">
                               <div className="flex items-center gap-2">
@@ -798,10 +919,9 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
                               {prospect.overall}
                             </td>
                             <td className="py-2.5 px-3">
-                              <div className={`font-semibold ${getMomentumToneClass(prospect.momentumTier)}`}>
-                                {prospect.momentumTier}
-                              </div>
-                              <div className="text-slate-400">{prospect.trait}</div>
+                              <span className={`font-semibold ${getGrowthColorClass(prospect.growthMomentum)}`}>
+                                {getGrowthLabel(prospect.growthMomentum)}
+                              </span>
                             </td>
                             <td className="py-2.5 px-3 text-right font-mono tabular-nums">
                               <span className={canAfford ? 'text-amber-400 font-bold' : 'text-slate-400 font-semibold'}>
@@ -811,10 +931,11 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
                             <td className="py-2.5 px-4 text-right">
                               <button
                                 type="button"
-                                onClick={() => handleOpenPoach( { prospect, sellingClub, compensationFee } )}
-                                className="px-3 py-1.5 bg-amber-400/15 hover:bg-amber-400/25 border border-amber-400/40 text-amber-300 font-bold text-xs rounded-lg transition-colors cursor-pointer whitespace-nowrap"
+                                disabled={isAcademyFull}
+                                onClick={() => handleOpenPoach({ prospect, sellingClub, compensationFee })}
+                                className="px-3 py-1.5 bg-amber-400/15 hover:bg-amber-400/25 disabled:opacity-40 disabled:cursor-not-allowed border border-amber-400/40 text-amber-300 font-bold text-xs rounded-lg transition-colors cursor-pointer whitespace-nowrap"
                               >
-                                Make Approach
+                                {isAcademyFull ? 'Academy Full' : 'Poach'}
                               </button>
                             </td>
                           </tr>
@@ -823,16 +944,16 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
                     </tbody>
                   </table>
                 </div>
-                {filteredRivals.length > 80 && (
+                {filteredRivals.length > 100 && (
                   <div className="px-4 py-2.5 border-t border-white/10 text-xs text-slate-400 text-center font-mono">
-                    Showing top 80 of {filteredRivals.length} matching prospects. Narrow filters to inspect specific clubs.
+                    Showing top 100 of {filteredRivals.length} matching players. Use filters to narrow results.
                   </div>
                 )}
               </div>
 
-              {/* Mobile Prospect Cards */}
+              {/* Mobile Cards */}
               <div className="lg:hidden grid grid-cols-1 md:grid-cols-2 gap-3">
-                {filteredRivals.slice(0, 50).map(({ prospect, sellingClub, compensationFee }) => {
+                {filteredRivals.slice(0, 60).map(({ prospect, sellingClub, compensationFee }) => {
                   const canAfford = club.transferBudget >= compensationFee && club.balance >= compensationFee;
                   return (
                     <div
@@ -856,13 +977,13 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
 
                       <div className="flex items-center justify-between text-xs pt-2 border-t border-white/10">
                         <div>
-                          <span className={`font-semibold block ${getMomentumToneClass(prospect.momentumTier)}`}>
-                            {prospect.momentumTier}
+                          <span className="text-slate-400 block">Growth</span>
+                          <span className={`font-semibold ${getGrowthColorClass(prospect.growthMomentum)}`}>
+                            {getGrowthLabel(prospect.growthMomentum)}
                           </span>
-                          <span className="text-slate-400">{prospect.trait}</span>
                         </div>
                         <div className="text-right font-mono tabular-nums">
-                          <span className="text-slate-400 block">Compensation</span>
+                          <span className="text-slate-400 block font-sans">Price</span>
                           <span className={canAfford ? 'text-amber-400 font-bold' : 'text-slate-400 font-bold'}>
                             £{(compensationFee / 1000000).toFixed(2)}M
                           </span>
@@ -871,10 +992,11 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
 
                       <button
                         type="button"
+                        disabled={isAcademyFull}
                         onClick={() => handleOpenPoach({ prospect, sellingClub, compensationFee })}
-                        className="w-full min-h-11 px-4 py-2 bg-amber-400/15 hover:bg-amber-400/25 border border-amber-400/40 text-amber-300 font-bold text-xs rounded-lg transition-colors cursor-pointer"
+                        className="w-full min-h-11 px-4 py-2 bg-amber-400/15 hover:bg-amber-400/25 disabled:opacity-40 disabled:cursor-not-allowed border border-amber-400/40 text-amber-300 font-bold text-xs rounded-lg transition-colors cursor-pointer"
                       >
-                        Make Approach
+                        {isAcademyFull ? 'Academy Full (10/10)' : 'Make Poach Offer'}
                       </button>
                     </div>
                   );
@@ -885,18 +1007,18 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
         </div>
       )}
 
-      {/* Promotion Contract Dialog Modal */}
+      {/* Unrestricted Promote to First Team Modal */}
       <Modal
         isOpen={Boolean(selectedProspect)}
         onClose={() => setSelectedProspect(null)}
         maxWidthClass="max-w-md"
         borderClass="border-amber-400/30"
-        ariaLabel={selectedProspect ? `Promote ${selectedProspect.name}` : 'Promote Academy Prospect'}
+        ariaLabel={selectedProspect ? `Promote ${selectedProspect.name}` : 'Promote Academy Player'}
         header={
           selectedProspect && (
             <div>
               <span className="text-xs font-bold text-amber-400 block">
-                Academy Graduation Contract
+                First-Team Promotion
               </span>
               <h3 className="text-xl font-bold text-white mt-0.5">
                 Promote {selectedProspect.name}
@@ -906,7 +1028,11 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
                 <span aria-hidden="true">·</span>
                 <span>Age {selectedProspect.age}</span>
                 <span aria-hidden="true">·</span>
-                <span className="text-emerald-400 font-semibold">{selectedProspect.momentumTier}</span>
+                <span className="text-white font-bold">OVR {selectedProspect.overall}</span>
+                <span aria-hidden="true">·</span>
+                <span className={getGrowthColorClass(selectedProspect.growthMomentum)}>
+                  {getGrowthLabel(selectedProspect.growthMomentum)}
+                </span>
               </div>
             </div>
           )
@@ -923,10 +1049,9 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
             <button
               type="button"
               onClick={handleConfirmPromote}
-              disabled={club.squad.length >= 25 || promoteWage > wageSpace}
-              className="px-5 py-2 min-h-11 lg:min-h-0 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs rounded-lg shadow-md transition-all cursor-pointer"
+              className="px-5 py-2 min-h-11 lg:min-h-0 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-bold text-xs rounded-lg shadow-md transition-all cursor-pointer"
             >
-              Ratify Contract
+              Promote to First Team
             </button>
           </div>
         }
@@ -935,30 +1060,23 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
           <div className="space-y-4">
             <div className="bg-slate-900 border border-white/10 rounded-xl p-3 text-xs space-y-2">
               <div className="flex items-center justify-between">
-                <span className="text-slate-400">Current Senior Squad</span>
-                <span className={`font-mono font-bold tabular-nums ${club.squad.length >= 25 ? 'text-rose-400' : 'text-slate-200'}`}>
-                  {club.squad.length} / 25 players
+                <span className="text-slate-400">Current First-Team Size</span>
+                <span className="font-mono font-bold text-slate-200 tabular-nums">
+                  {club.squad.length} players
                 </span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-slate-400">Weekly Wage Headroom</span>
+                <span className="text-slate-400">Academy Spots After Promotion</span>
                 <span className="font-mono font-bold text-emerald-400 tabular-nums">
-                  £{(wageSpace / 1000).toFixed(1)}k/wk
+                  {Math.max(0, academyList.length - 1)} / {MAX_USER_ACADEMY_CAPACITY}
                 </span>
               </div>
             </div>
 
-            {club.squad.length >= 25 && (
-              <div className="p-3 bg-rose-950/40 border border-rose-500/40 rounded-xl text-xs text-rose-300 flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
-                <span>Squad is full at 25 players. Sell or release a senior squad player first.</span>
-              </div>
-            )}
-
             <div className="space-y-4">
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1">
-                  Offered Weekly Professional Wage (£/week)
+                  Weekly Wage (£/week)
                 </label>
                 <div className="flex items-center gap-2">
                   <input
@@ -971,7 +1089,7 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
                     onChange={e => setPromoteWage(Number(e.target.value))}
                     className="flex-1 min-h-11 lg:min-h-0 px-3.5 py-2 bg-slate-900 border border-white/10 rounded-lg text-white font-mono text-base md:text-sm focus:outline-none focus:border-amber-400"
                   />
-                  <span className="text-xs text-slate-400 font-mono shrink-0 tabular-nums">
+                  <span className="text-xs font-mono text-emerald-400 font-bold shrink-0 tabular-nums">
                     £{(promoteWage / 1000).toFixed(1)}k/wk
                   </span>
                 </div>
@@ -979,17 +1097,17 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
 
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1">
-                  Contract Duration
+                  Contract Length (Years)
                 </label>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  {[1, 2, 3, 5].map(yrs => (
+                <div className="grid grid-cols-4 gap-2">
+                  {[2, 3, 4, 5].map(yrs => (
                     <button
                       key={yrs}
                       type="button"
                       onClick={() => setPromoteYears(yrs)}
-                      className={`py-2 min-h-11 lg:min-h-0 text-xs font-mono font-bold rounded-lg border transition-colors cursor-pointer ${
+                      className={`py-2 min-h-11 lg:min-h-0 text-xs font-mono font-bold rounded-lg border transition-all cursor-pointer ${
                         promoteYears === yrs
-                          ? 'bg-amber-400 text-slate-950 border-amber-400'
+                          ? 'bg-amber-400 text-slate-950 border-amber-400 shadow-sm'
                           : 'bg-slate-900 border-white/10 text-slate-400 hover:text-white'
                       }`}
                     >
@@ -1003,21 +1121,112 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
         )}
       </Modal>
 
-      {/* Rival Academy Poach Compensation Modal */}
+      {/* Sell Academy Player Modal */}
+      <Modal
+        isOpen={Boolean(sellTarget)}
+        onClose={() => setSellTarget(null)}
+        maxWidthClass="max-w-md"
+        borderClass="border-emerald-400/30"
+        ariaLabel={sellTarget ? `Sell ${sellTarget.name}` : 'Sell Academy Player'}
+        header={
+          sellTarget && (
+            <div>
+              <span className="text-xs font-bold text-emerald-400 block">
+                Academy Player Sale
+              </span>
+              <h3 className="text-xl font-bold text-white mt-0.5">
+                Sell {sellTarget.name}
+              </h3>
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400 mt-1 font-mono">
+                <span>{sellTarget.position}</span>
+                <span aria-hidden="true">·</span>
+                <span>Age {sellTarget.age}</span>
+                <span aria-hidden="true">·</span>
+                <span className="text-white font-bold">OVR {sellTarget.overall}</span>
+                <span aria-hidden="true">·</span>
+                <span className="text-amber-300">
+                  Val £{((sellTarget.value ?? calculateAcademyPlayerValue(sellTarget.overall, club.tier)) / 1000000).toFixed(2)}M
+                </span>
+              </div>
+            </div>
+          )
+        }
+        footer={
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={() => setSellTarget(null)}
+              className="px-4 py-2 min-h-11 lg:min-h-0 text-xs font-medium text-slate-400 hover:text-white cursor-pointer"
+            >
+              Close
+            </button>
+          </div>
+        }
+      >
+        {sellTarget && (
+          <div className="space-y-3">
+            {!windowOpen ? (
+              <div className="p-3.5 bg-slate-900 border border-white/10 rounded-xl text-xs text-slate-300 flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" />
+                <span>
+                  Transfer window is currently closed ({windowLabel}). You can sell academy players when the transfer window is open.
+                </span>
+              </div>
+            ) : saleOffers.length === 0 ? (
+              <div className="p-4 bg-slate-900 border border-white/10 rounded-xl text-xs text-slate-400 text-center">
+                No clubs currently have budget or squad room to bid for {sellTarget.name}.
+              </div>
+            ) : (
+              <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                {saleOffers.map(offer => (
+                  <div
+                    key={offer.club.id}
+                    className="p-3 bg-slate-900 border border-white/10 rounded-xl flex items-center justify-between gap-3"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className="w-2.5 h-2.5 rounded-full shrink-0"
+                          style={{ backgroundColor: offer.club.primaryColor }}
+                        />
+                        <span className="text-sm font-bold text-white truncate">
+                          {offer.club.name}
+                        </span>
+                      </div>
+                      <span className="text-xs text-slate-400 font-mono">
+                        {getTierName(offer.club.tier)} · Offered £{(offer.fee / 1000000).toFixed(2)}M
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleAcceptSaleOffer(offer)}
+                      className="min-h-10 px-3.5 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs rounded-lg shrink-0 cursor-pointer"
+                    >
+                      Accept
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </Modal>
+
+      {/* Poach Negotiation Modal */}
       <Modal
         isOpen={Boolean(poachTarget)}
         onClose={() => {
           setPoachTarget(null);
           setPoachError(null);
         }}
-        maxWidthClass="max-w-lg"
+        maxWidthClass="max-w-md"
         borderClass="border-amber-400/30"
-        ariaLabel={poachTarget ? `Poach ${poachTarget.prospect.name}` : 'Youth Compensation Approach'}
+        ariaLabel={poachTarget ? `Poach ${poachTarget.prospect.name}` : 'Poach Academy Player'}
         header={
           poachTarget && (
             <div>
               <span className="text-xs font-bold text-amber-400 block">
-                Youth Compensation Approach
+                Academy Poach Offer
               </span>
               <h3 className="text-xl font-bold text-white mt-0.5">
                 {poachTarget.prospect.name}
@@ -1052,82 +1261,43 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
               disabled={!livePoachEvaluation?.ok || !director || !onCompletePoach}
               className="px-5 py-2 min-h-11 lg:min-h-0 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs rounded-lg shadow-md transition-all cursor-pointer"
             >
-              Submit Compensation Offer
+              Confirm Poach Offer
             </button>
           </div>
         }
       >
         {poachTarget && (
           <div className="space-y-4">
-            {/* Scout Profile Summary */}
             <div className="bg-slate-900 border border-white/10 rounded-xl p-3.5 text-xs space-y-2">
               <div className="flex items-center justify-between">
-                <span className="text-slate-400">Momentum & Trait</span>
-                <span className={`font-bold ${getMomentumToneClass(poachTarget.prospect.momentumTier)}`}>
-                  {poachTarget.prospect.momentumTier} · {poachTarget.prospect.trait}
+                <span className="text-slate-400">Growth Rate</span>
+                <span className={`font-bold ${getGrowthColorClass(poachTarget.prospect.growthMomentum)}`}>
+                  {getGrowthLabel(poachTarget.prospect.growthMomentum)}
                 </span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-slate-400">Transfer War Chest</span>
+                <span className="text-slate-400">Academy Spots</span>
+                <span className="font-mono font-bold text-white tabular-nums">
+                  {academyList.length} / {MAX_USER_ACADEMY_CAPACITY}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400">Transfer Budget</span>
                 <span className="font-mono font-bold text-amber-400 tabular-nums">
                   £{(club.transferBudget / 1000000).toFixed(2)}M
                 </span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-slate-400">Estimated Tribunal Valuation</span>
+                <span className="text-slate-400">Asking Price</span>
                 <span className="font-mono font-bold text-white tabular-nums">
                   £{(poachTarget.compensationFee / 1000000).toFixed(2)}M
                 </span>
               </div>
             </div>
 
-            {/* Destination Choice */}
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                Placement Upon Signing
-              </label>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setPoachDestination('academy');
-                    setPoachError(null);
-                  }}
-                  className={`p-3 rounded-xl border text-left transition-colors cursor-pointer ${
-                    poachDestination === 'academy'
-                      ? 'bg-amber-400/15 border-amber-400 text-white'
-                      : 'bg-slate-900 border-white/10 text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <div className="text-xs font-bold">Youth Academy ({academyList.length}/{MAX_USER_ACADEMY_CAPACITY})</div>
-                  <div className="text-xs text-slate-400 mt-0.5">No senior slot or weekly wage needed</div>
-                </button>
-
-                <button
-                  type="button"
-                  disabled={poachTarget.prospect.age < 17}
-                  onClick={() => {
-                    setPoachDestination('senior');
-                    setPoachError(null);
-                  }}
-                  className={`p-3 rounded-xl border text-left transition-colors cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed ${
-                    poachDestination === 'senior'
-                      ? 'bg-amber-400/15 border-amber-400 text-white'
-                      : 'bg-slate-900 border-white/10 text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <div className="text-xs font-bold">Senior Squad ({club.squad.length}/25)</div>
-                  <div className="text-xs text-slate-400 mt-0.5">
-                    {poachTarget.prospect.age < 17 ? 'Requires age 17+ for pro terms' : 'Immediate first-team eligibility'}
-                  </div>
-                </button>
-              </div>
-            </div>
-
-            {/* Compensation Fee Offer */}
             <div>
               <label className="block text-xs font-semibold text-slate-300 mb-1">
-                Offered Compensation Fee (£)
+                Offered Fee (£)
               </label>
               <div className="flex items-center gap-2">
                 <input
@@ -1148,48 +1318,6 @@ export const YouthAcademyView: React.FC<YouthAcademyViewProps> = ({
               </div>
             </div>
 
-            {/* Senior Contract Terms if signing straight to first team */}
-            {poachDestination === 'senior' && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-1">
-                    Weekly Wage (£/wk)
-                  </label>
-                  <input
-                    type="number"
-                    inputMode="numeric"
-                    min={500}
-                    step={250}
-                    value={poachWage}
-                    onChange={e => setPoachWage(Number(e.target.value))}
-                    className="w-full min-h-11 lg:min-h-0 px-3 py-2 bg-slate-900 border border-white/10 rounded-lg text-white font-mono text-sm focus:outline-none focus:border-amber-400"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-1">
-                    Contract Length
-                  </label>
-                  <div className="grid grid-cols-4 gap-1.5">
-                    {[2, 3, 4, 5].map(yrs => (
-                      <button
-                        key={yrs}
-                        type="button"
-                        onClick={() => setPoachYears(yrs)}
-                        className={`min-h-11 lg:min-h-0 py-1.5 text-xs font-mono font-bold rounded-lg border cursor-pointer ${
-                          poachYears === yrs
-                            ? 'bg-amber-400 text-slate-950 border-amber-400'
-                            : 'bg-slate-900 border-white/10 text-slate-400 hover:text-white'
-                        }`}
-                      >
-                        {yrs}y
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Live Validation / Error Message */}
             {(poachError || (livePoachEvaluation && !livePoachEvaluation.ok)) && (
               <div className="p-3 bg-rose-950/40 border border-rose-500/40 rounded-xl text-xs text-rose-300 flex items-start gap-2">
                 <AlertCircle className="w-4 h-4 shrink-0 text-rose-400 mt-0.5" />

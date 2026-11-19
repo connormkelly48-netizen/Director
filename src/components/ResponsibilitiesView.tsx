@@ -7,6 +7,7 @@ import React, { useMemo } from 'react';
 import { Club, Director, Manager, DelegationMatrix, TransferRecord } from '../types/game';
 import { Sliders, AlertTriangle, Flame, Info, History, ArrowRightLeft } from 'lucide-react';
 import { sounds } from '../services/soundEffects';
+import { getDelegationTrustPenalties } from '../services/transferService';
 
 interface ResponsibilitiesViewProps {
   club: Club;
@@ -53,14 +54,72 @@ export const ResponsibilitiesView: React.FC<ResponsibilitiesViewProps> = ({
       .slice(0, 10);
   }, [transferHistory, club.id]);
 
+  const penalties = useMemo(() => getDelegationTrustPenalties(manager), [manager]);
+
+  const weeklyTradeOff = useMemo(() => {
+    if (!manager) return null;
+    const directorControlsCount = [
+      delegation.transferSignings === 'director',
+      delegation.transferSales === 'director',
+      delegation.tacticalStyle === 'director_mandated',
+    ].filter(Boolean).length;
+    const managerFreedomCount = [
+      delegation.transferSignings === 'manager',
+      delegation.transferSales === 'manager',
+      delegation.contractRenewals === 'manager',
+      delegation.youthPromotion === 'manager',
+      delegation.tacticalStyle === 'manager_freedom',
+    ].filter(Boolean).length;
+
+    if (manager.controlDesire === 'autocrat') {
+      if (directorControlsCount >= 2) {
+        return {
+          tone: 'rose' as const,
+          label: directorControlsCount === 3 ? '-2 Trust / wk' : '-1 Trust / wk',
+          summary: `${manager.name} (Autocrat) feels sidelined across ${directorControlsCount} key areas. Dressing room tension may spill over until more control is delegated.`,
+        };
+      }
+      if (managerFreedomCount >= 4) {
+        return {
+          tone: 'emerald' as const,
+          label: '+1 Trust / wk',
+          summary: `${manager.name} thrives with command of recruitment and touchline DNA (+1 Trust & squad unity lift weekly).`,
+        };
+      }
+    } else if (manager.controlDesire === 'head_coach') {
+      if (managerFreedomCount >= 3) {
+        return {
+          tone: 'emerald' as const,
+          label: '+1 Trust & Morale / wk',
+          summary: `Delegating authority to ${manager.name} keeps training sharp and boosts squad morale weekly.`,
+        };
+      }
+    } else if (manager.controlDesire === 'collaborator') {
+      if (delegation.transferSignings === 'shared' || delegation.transferSales === 'shared') {
+        return {
+          tone: 'emerald' as const,
+          label: '+1 Trust / wk',
+          summary: `Shared Consensus fits ${manager.name}'s collaborative style, reinforcing trust every week.`,
+        };
+      }
+    }
+    return {
+      tone: 'neutral' as const,
+      label: 'Steady Balance',
+      summary: `Current delegation grants ${managerFreedomCount} coach-led duties without acute weekly friction.`,
+    };
+  }, [manager, delegation]);
+
   const getSigningsExplanation = () => {
     if (delegation.transferSignings === 'director') {
-      return 'You decide and finalize every signing yourself. The Head Coach never submits bids on his own, and no trust penalties apply.';
+      return manager?.controlDesire === 'autocrat'
+        ? `You decide and finalize every signing yourself. Warning: shutting an Autocrat out of recruitment contributes to weekly chemistry friction.`
+        : 'You decide and finalize every signing yourself. The Head Coach never submits bids on his own, and no override penalties apply.';
     }
     if (delegation.transferSignings === 'shared') {
-      return 'During open windows (Weeks 1–6 & 20–24), the Head Coach submits up to 3 Transfer Proposals (3-week expiry) to Transfers > Proposals (+2 Trust if approved, -3 if rejected). Signing a player he objects to yourself costs -10 Trust (+1 if he agrees).';
+      return `During open windows (Weeks 1–6 & 20–24), the Head Coach submits up to 3 Transfer Proposals (3-week expiry) to Transfers > Proposals (+2 Trust if approved, -3 if rejected). Signing a player he objects to yourself costs ${penalties.overrideSigning === -25 ? -13 : penalties.sharedObjection} Trust (+${penalties.sharedAgree} if he agrees).`;
     }
-    return 'During open windows (Weeks 1–6 & 20–24), the Head Coach independently signs up to 5 players per season within board, budget, wage, and 25-man rules (+1 Trust each). Overriding him with your own signing costs -20 Trust.';
+    return `During open windows (Weeks 1–6 & 20–24), the Head Coach independently signs up to 5 players per season within board, budget, wage, and 25-man rules (+1 Trust each). Overriding him with your own signing costs ${penalties.overrideSigning} Trust.`;
   };
 
   const getSalesExplanation = () => {
@@ -68,9 +127,9 @@ export const ResponsibilitiesView: React.FC<ResponsibilitiesViewProps> = ({
       return 'You control all outgoing sales and releases. The Head Coach never moves players out or objects to your sales.';
     }
     if (delegation.transferSales === 'shared') {
-      return 'During open windows (Weeks 1–6 & 20–24), the Head Coach proposes surplus sales (never starters or below minimum depth) to Transfers > Proposals. Selling a starter or weakening depth yourself requires forcing it through (-10 Trust; +1 if he agrees).';
+      return `During open windows (Weeks 1–6 & 20–24), the Head Coach proposes surplus sales (never starters or below minimum depth) to Transfers > Proposals. Selling a starter or weakening depth yourself requires forcing it through (${penalties.sharedObjection} Trust; +${penalties.sharedAgree} if he agrees).`;
     }
-    return 'During open windows (Weeks 1–6 & 20–24), the Head Coach independently sells surplus or unhappy non-starters (up to 5 per season, never starting XI or below minimum positional depth). Overriding him by selling a player yourself costs -15 Trust.';
+    return `During open windows (Weeks 1–6 & 20–24), the Head Coach independently sells surplus or unhappy non-starters (up to 5 per season, never starting XI or below minimum positional depth). Overriding him by selling a player yourself costs ${penalties.overrideSale} Trust.`;
   };
 
   return (
@@ -115,11 +174,12 @@ export const ResponsibilitiesView: React.FC<ResponsibilitiesViewProps> = ({
             The Golden Rule of Sporting Directorship:
           </strong>
           <p className="text-slate-300 leading-relaxed">
-            If you set signings or sales to <strong>Manager Control</strong> and bypass the Head Coach, overriding him costs{' '}
-            <span className="text-rose-400 font-semibold font-mono">-20 Trust</span> on signings and{' '}
-            <span className="text-rose-400 font-semibold font-mono">-15 Trust</span> on sales. In{' '}
+            If you set signings or sales to <strong>Manager Control</strong> and bypass the Head Coach, overriding{' '}
+            {manager ? `${manager.name} (${manager.controlDesire})` : 'him'} costs{' '}
+            <span className="text-rose-400 font-semibold font-mono">{penalties.overrideSigning} Trust</span> on signings and{' '}
+            <span className="text-rose-400 font-semibold font-mono">{penalties.overrideSale} Trust</span> on sales. In{' '}
             <strong>Shared Consensus</strong>, forcing through a contested move costs{' '}
-            <span className="text-rose-400 font-semibold font-mono">-10 Trust</span>, while rejecting a proposal costs{' '}
+            <span className="text-rose-400 font-semibold font-mono">{penalties.sharedObjection} Trust</span>, while rejecting a proposal costs{' '}
             <span className="text-rose-400 font-semibold font-mono">-3 Trust</span>.
           </p>
         </div>
@@ -408,11 +468,33 @@ export const ResponsibilitiesView: React.FC<ResponsibilitiesViewProps> = ({
                   "{manager.profileSnippet}"
                 </div>
 
+                {weeklyTradeOff && (
+                  <div
+                    className={`p-3 rounded-xl border text-xs space-y-1 ${
+                      weeklyTradeOff.tone === 'rose'
+                        ? 'bg-rose-950/20 border-rose-500/30 text-rose-200'
+                        : weeklyTradeOff.tone === 'emerald'
+                        ? 'bg-emerald-950/20 border-emerald-500/30 text-emerald-200'
+                        : 'bg-slate-900/60 border-white/10 text-slate-300'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] font-bold uppercase tracking-wider opacity-80">
+                        Weekly Matrix Outcome
+                      </span>
+                      <span className="font-mono font-bold text-[11px]">
+                        {weeklyTradeOff.label}
+                      </span>
+                    </div>
+                    <p className="leading-snug text-[11px]">{weeklyTradeOff.summary}</p>
+                  </div>
+                )}
+
                 {manager.controlDesire === 'autocrat' && (
                   <div className="p-3 bg-rose-950/20 border border-rose-500/30 rounded-xl text-xs text-rose-300 flex items-start gap-2">
                     <Flame className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
                     <span>
-                      Warning: {manager.name} is an <strong>Autocrat</strong>. Restricting his transfer control or mandating formations will cause friction and erode his chemistry with you quickly!
+                      Warning: {manager.name} is an <strong>Autocrat</strong>. Restricting his transfer control or mandating formations erodes trust weekly and carries steeper override penalties ({penalties.overrideSigning} / {penalties.overrideSale}).
                     </span>
                   </div>
                 )}

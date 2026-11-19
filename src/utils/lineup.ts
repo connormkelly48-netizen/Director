@@ -7,30 +7,13 @@ import { FORMATIONS, FORMATION_IDS, ROLE_TO_POSITION } from '../data/formations'
 import { loadDatabase } from '../data/database';
 import { Club, FormationId, Lineup, Manager, Player, PlayerPosition, POSITION_ORDER, SlotRole } from '../types/game';
 
-export type SlotFitLevel = 'natural' | 'good' | 'poor' | 'bad';
+export type SlotFitLevel = 'natural' | 'poor' | 'bad';
 
 export interface SlotFitResult {
   effectiveOverall: number;
-  penalty: number; // 0, -5, -12, -20, or -40
+  penalty: number; // 0, -12, -20, or -40
   fit: SlotFitLevel;
 }
-
-const NATURAL_ROLES: Record<SlotRole, readonly string[]> = {
-  GK: ['Standard Keeper', 'Sweeper Keeper'],
-  LB: ['Wingback', 'Defensive Fullback', 'Inverted Fullback', 'Inverted Wingback'],
-  RB: ['Wingback', 'Defensive Fullback', 'Inverted Fullback', 'Inverted Wingback'],
-  LWB: ['Wingback', 'Defensive Fullback', 'Inverted Fullback', 'Inverted Wingback'],
-  RWB: ['Wingback', 'Defensive Fullback', 'Inverted Fullback', 'Inverted Wingback'],
-  CB: ['Central Defender', 'Ball-Playing Defender', 'Wide Center Back'],
-  CDM: ['Ball Winning Midfielder', 'Deep Lying Playmaker', 'Central Midfielder'],
-  CM: ['Central Midfielder', 'Box to Box', 'Mezzala', 'Deep Lying Playmaker', 'Advanced Playmaker'],
-  CAM: ['Attacking Midfielder', 'Advanced Playmaker'],
-  LM: ['Winger', 'Inside Forward'],
-  RM: ['Winger', 'Inside Forward'],
-  LW: ['Winger', 'Inside Forward'],
-  RW: ['Winger', 'Inside Forward'],
-  ST: ['Advanced Forward', 'Target Forward', 'False Nine', 'Inside Forward'],
-};
 
 const BENCH_SIZE = 7;
 
@@ -46,19 +29,12 @@ export function getSlotFit(player: Player, slotRole: SlotRole): SlotFitResult {
     };
   }
 
-  // Same coarse position
+  // Any role matching the player's listed position plays at full normal OVR
   if (player.position === slotPos) {
-    if (NATURAL_ROLES[slotRole].includes(player.roleDetail)) {
-      return {
-        effectiveOverall: player.overall,
-        penalty: 0,
-        fit: 'natural',
-      };
-    }
     return {
-      effectiveOverall: Math.max(25, player.overall - 5),
-      penalty: -5,
-      fit: 'good',
+      effectiveOverall: player.overall,
+      penalty: 0,
+      fit: 'natural',
     };
   }
 
@@ -420,23 +396,19 @@ export function changeFormation(
     if (remainingXI.length === 0) break;
 
     let targetIdx = -1;
-    let bestKey: [number, number, number] = [999, 999, 999];
+    let bestKey: [number, number] = [999, 999];
     for (const idx of unfilled) {
       const role = def.slots[idx].role;
       const isGk = role === 'GK' ? 0 : 1;
       let nat = 0;
-      let good = 0;
       for (const p of remainingXI) {
-        const f = getSlotFit(p, role).fit;
-        if (f === 'natural') nat += 1;
-        if (f === 'natural' || f === 'good') good += 1;
+        if (getSlotFit(p, role).fit === 'natural') nat += 1;
       }
-      const key: [number, number, number] = [isGk, nat, good];
+      const key: [number, number] = [isGk, nat];
       if (
         targetIdx === -1 ||
         key[0] < bestKey[0] ||
-        (key[0] === bestKey[0] && key[1] < bestKey[1]) ||
-        (key[0] === bestKey[0] && key[1] === bestKey[1] && key[2] < bestKey[2])
+        (key[0] === bestKey[0] && key[1] < bestKey[1])
       ) {
         targetIdx = idx;
         bestKey = key;

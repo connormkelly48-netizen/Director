@@ -50,7 +50,9 @@ export const SeasonFinaleModal: React.FC<SeasonFinaleModalProps> = ({
   const handlePromote = (prospect: AcademyPlayer) => {
     if (!playerClub || !onUpdateClub) return;
     const baseWage = playerClub.tier === 1 ? 5000 : playerClub.tier === 2 ? 2500 : 1200;
-    const result = promoteAcademyPlayer(playerClub, prospect.id, baseWage, 3, manager);
+    const result = promoteAcademyPlayer(playerClub, prospect.id, baseWage, 3, manager, {
+      unrestricted: true,
+    });
 
     if (!result.success) {
       sounds.playCrisis();
@@ -274,6 +276,76 @@ export const SeasonFinaleModal: React.FC<SeasonFinaleModalProps> = ({
                 </div>
               </div>
             </div>
+
+            {/* Director Grade Factor Breakdown */}
+            {summary.gradeBreakdown && summary.gradeBreakdown.length > 0 && (
+              <div className="bg-slate-900/80 border border-white/10 rounded-xl p-4 sm:p-5 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-2.5">
+                  <div>
+                    <h4 className="text-xs font-bold text-white uppercase tracking-wider">
+                      Executive Evaluation Breakdown
+                    </h4>
+                    <span className="text-[11px] text-slate-400">
+                      Weighted pillars determining your seasonal Boardroom Grade ({summary.directorGrade})
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3 text-[11px] font-mono">
+                    {summary.transferRoiDelta !== undefined && (
+                      <span className={summary.transferRoiDelta >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                        Transfer ROI: {summary.transferRoiDelta >= 0 ? `+${summary.transferRoiDelta}` : summary.transferRoiDelta} OVR
+                      </span>
+                    )}
+                    {summary.netSpendSeason !== undefined && (
+                      <span className="text-amber-300">
+                        Season Net Spend: £{(summary.netSpendSeason / 1000000).toFixed(1)}M
+                      </span>
+                    )}
+                    {summary.academyPromotionsSeason !== undefined && (
+                      <span className="text-blue-300">
+                        Academy Graduations: {summary.academyPromotionsSeason}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {summary.gradeBreakdown.map(factor => {
+                    const barColor =
+                      factor.score >= 75
+                        ? 'bg-emerald-400'
+                        : factor.score >= 55
+                        ? 'bg-amber-400'
+                        : 'bg-rose-500';
+                    const scoreTextColor =
+                      factor.score >= 75
+                        ? 'text-emerald-400'
+                        : factor.score >= 55
+                        ? 'text-amber-300'
+                        : 'text-rose-400';
+
+                    return (
+                      <div key={factor.id} className="bg-slate-950/60 border border-white/5 rounded-xl p-3 space-y-1.5">
+                        <div className="flex items-center justify-between gap-2 text-xs">
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <span className="font-bold text-white truncate">{factor.label}</span>
+                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 shrink-0">
+                              {Math.round(factor.weight * 100)}% wt
+                            </span>
+                          </div>
+                          <span className={`font-mono font-extrabold tabular-nums shrink-0 ${scoreTextColor}`}>
+                            {factor.score}/100
+                          </span>
+                        </div>
+                        <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                          <div className={`h-full rounded-full ${barColor}`} style={{ width: `${Math.min(100, Math.max(0, factor.score))}%` }} />
+                        </div>
+                        <p className="text-[11px] text-slate-400 leading-snug">{factor.detail}</p>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* Head Coach Season Activity Summary */}
             {playerClub && (() => {
@@ -605,7 +677,7 @@ export const SeasonFinaleModal: React.FC<SeasonFinaleModalProps> = ({
 
                       <div className="mt-2 text-xs font-mono flex items-center justify-between bg-black/40 px-2.5 py-1.5 rounded-lg border border-white/5">
                         <span className="text-slate-400">Current OVR: <strong className="text-white">{prospect.overall}</strong> <span className="text-slate-500 text-xs sm:text-[10px]">/ 99</span></span>
-                        <span className="text-emerald-400 font-bold">{prospect.momentumTier}</span>
+                        <span className="text-emerald-400 font-bold capitalize">{prospect.growthMomentum || 'steady'}</span>
                       </div>
 
                       <div className="text-xs sm:text-[11px] text-amber-300/90 font-medium mt-1.5">
@@ -630,8 +702,7 @@ export const SeasonFinaleModal: React.FC<SeasonFinaleModalProps> = ({
                       <button
                         type="button"
                         onClick={() => handlePromote(prospect)}
-                        disabled={squadSlotsLeft === 0}
-                        className="min-h-11 lg:min-h-0 px-3 py-1 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs rounded-lg shadow-sm flex items-center gap-1 transition-all cursor-pointer active:scale-95"
+                        className="min-h-11 lg:min-h-0 px-3 py-1 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-bold text-xs rounded-lg shadow-sm flex items-center gap-1 transition-all cursor-pointer active:scale-95"
                       >
                         <ArrowUpRight className="w-3.5 h-3.5" />
                         <span>Promote to Senior</span>

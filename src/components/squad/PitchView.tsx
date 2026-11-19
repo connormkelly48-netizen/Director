@@ -6,7 +6,7 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { MotionConfig } from 'motion/react';
 import { ChevronDown, Info, MoreHorizontal, RotateCcw, Sparkles, Trash2, X } from 'lucide-react';
-import { Club, FormationId, Lineup, Manager, Player, SlotRole } from '../../types/game';
+import { Club, FormationId, Lineup, Manager, ManagerPlayerRequest, Player, SlotRole } from '../../types/game';
 import { FORMATIONS } from '../../data/formations';
 import {
   autoPickLineup,
@@ -17,6 +17,7 @@ import {
   getSlotFit,
 } from '../../utils/lineup';
 import { sounds } from '../../services/soundEffects';
+import { isTransferWindowOpen } from '../../services/transferService';
 import { EmptySlotToken, PlayerCard } from './PlayerCard';
 import { FormationSheet } from './FormationSheet';
 import { BenchStrip, SelectionTarget } from './BenchStrip';
@@ -26,12 +27,17 @@ import { PlayerSheet } from './PlayerSheet';
 interface PitchViewProps {
   club: Club;
   manager?: Manager;
+  currentWeek?: number;
   lineup: Lineup;
+  directorControlled?: boolean;
+  windowPlayerRequests?: ManagerPlayerRequest[];
   onChangeLineup: (next: Lineup) => void;
   onSell: (player: Player) => void;
   onOffer: (player: Player) => void;
   onRenew: (player: Player) => void;
   onRelease: (player: Player) => void;
+  onRequestSale?: (player: Player) => void;
+  onRequestRenewal?: (player: Player) => void;
 }
 
 interface DragState {
@@ -45,13 +51,19 @@ interface DragState {
 export const PitchView: React.FC<PitchViewProps> = ({
   club,
   manager,
+  currentWeek = 1,
   lineup,
+  directorControlled = false,
+  windowPlayerRequests = [],
   onChangeLineup,
   onSell,
   onOffer,
   onRenew,
   onRelease,
+  onRequestSale,
+  onRequestRenewal,
 }) => {
+  const windowOpen = isTransferWindowOpen(currentWeek);
   const [selection, setSelection] = useState<SelectionTarget | null>(null);
   const [showFormationSheet, setShowFormationSheet] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
@@ -480,7 +492,7 @@ export const PitchView: React.FC<PitchViewProps> = ({
           {/* LEFT COLUMN: Sticky Control Bar + Pitch + Selection Action Bar */}
           <div className="space-y-2.5">
             {/* Sticky Control Bar */}
-            <div className="sticky top-[65px] lg:top-[115px] xl:top-[63px] z-30 bg-[#0b0f17] border border-slate-800 rounded-xl px-2.5 py-1.5 flex items-center justify-between gap-1.5 shadow-lg">
+            <div className="sticky top-[65px] lg:top-[115px] xl:top-[63px] z-30 bg-[#0b0f17] border border-slate-800 rounded-xl px-2 sm:px-2.5 py-1.5 flex items-center justify-between gap-1 sm:gap-1.5 shadow-lg">
               {/* Formation button */}
               <button
                 type="button"
@@ -693,8 +705,8 @@ export const PitchView: React.FC<PitchViewProps> = ({
 
             {/* Bottom Selection Action Bar */}
             {selectedPlayer && (
-              <div className="bg-[#111827] border border-amber-400/40 rounded-xl px-3 py-2 flex items-center justify-between gap-2 shadow-lg">
-                <div className="min-w-0">
+              <div className="bg-[#111827] border border-amber-400/40 rounded-xl px-3 py-2 flex flex-wrap sm:flex-nowrap items-center justify-between gap-2 shadow-lg">
+                <div className="min-w-0 flex-1">
                   <p className="text-xs font-extrabold text-white truncate">{selectedPlayer.name}</p>
                   <p className="text-xs text-amber-300 truncate">
                     {selectedSlotInfo.label} · Tap another slot to swap
@@ -820,15 +832,30 @@ export const PitchView: React.FC<PitchViewProps> = ({
               {/* Selected player's detail panel on desktop */}
               <PlayerSheet
                 player={selectedPlayer}
+                manager={manager}
+                windowOpen={windowOpen}
                 occupancyLabel={selectedSlotInfo.label}
                 slotRole={selectedSlotInfo.slotRole}
                 mode="panel"
                 isOpen={true}
+                directorControlled={directorControlled}
+                saleRequest={
+                  selectedPlayer
+                    ? windowPlayerRequests.find(r => r.playerId === selectedPlayer.id && r.kind === 'sale')
+                    : undefined
+                }
+                renewalRequest={
+                  selectedPlayer
+                    ? windowPlayerRequests.find(r => r.playerId === selectedPlayer.id && r.kind === 'renewal')
+                    : undefined
+                }
                 onClose={() => setSelection(null)}
                 onSell={onSell}
                 onOffer={onOffer}
                 onRenew={onRenew}
                 onRelease={onRelease}
+                onRequestSale={onRequestSale}
+                onRequestRenewal={onRequestRenewal}
               />
             </div>
           </div>
@@ -860,10 +887,23 @@ export const PitchView: React.FC<PitchViewProps> = ({
         {/* Mobile Bottom Sheet / Explicit "Player Info" Sheet */}
         <PlayerSheet
           player={mobileInfoPlayer}
+          manager={manager}
+          windowOpen={windowOpen}
           occupancyLabel={selectedSlotInfo.label}
           slotRole={selectedSlotInfo.slotRole}
           mode="sheet"
           isOpen={Boolean(mobileInfoPlayer)}
+          directorControlled={directorControlled}
+          saleRequest={
+            mobileInfoPlayer
+              ? windowPlayerRequests.find(r => r.playerId === mobileInfoPlayer.id && r.kind === 'sale')
+              : undefined
+          }
+          renewalRequest={
+            mobileInfoPlayer
+              ? windowPlayerRequests.find(r => r.playerId === mobileInfoPlayer.id && r.kind === 'renewal')
+              : undefined
+          }
           onClose={() => setMobileInfoPlayerId(null)}
           onSell={p => {
             setMobileInfoPlayerId(null);
@@ -881,6 +921,8 @@ export const PitchView: React.FC<PitchViewProps> = ({
             setMobileInfoPlayerId(null);
             onRelease(p);
           }}
+          onRequestSale={onRequestSale}
+          onRequestRenewal={onRequestRenewal}
         />
       </div>
     </MotionConfig>
